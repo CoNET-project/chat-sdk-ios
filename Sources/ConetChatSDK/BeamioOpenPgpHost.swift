@@ -16,8 +16,18 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler {
 	}
 
 	public func ensureReady(completion: @escaping (Bool) -> Void) {
+		// WKWebView / evaluateJavaScript are main-thread-only. Callers (e.g.
+		// history keccak on a utility queue) must never complete onto a bg thread
+		// and then call into WebKit — that triggers an intentional EXC_BREAKPOINT.
+		let finish: (Bool) -> Void = { ok in
+			if Thread.isMainThread {
+				completion(ok)
+			} else {
+				DispatchQueue.main.async { completion(ok) }
+			}
+		}
 		if ready {
-			completion(true)
+			finish(true)
 			return
 		}
 		DispatchQueue.main.async {
@@ -329,26 +339,41 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler {
 	}
 
 	private func runJs(_ expression: String, completion: @escaping (Result<String, Error>) -> Void) {
-		ensureReady { [weak self] ok in
-			guard let self, ok, let wv = self.webView else {
+		let invoke: () -> Void = { [weak self] in
+			guard let self else {
 				completion(.failure(NSError(domain: "BeamioOpenPgp", code: -3, userInfo: [
-					NSLocalizedDescriptionKey: "openpgp host not ready",
+					NSLocalizedDescriptionKey: "openpgp host deallocated",
 				])))
 				return
 			}
-			wv.evaluateJavaScript(expression) { result, error in
-				if let error {
-					completion(.failure(error))
+			self.ensureReady { ok in
+				// ensureReady always finishes on main; keep evaluateJavaScript there.
+				assert(Thread.isMainThread)
+				guard ok, let wv = self.webView else {
+					completion(.failure(NSError(domain: "BeamioOpenPgp", code: -3, userInfo: [
+						NSLocalizedDescriptionKey: "openpgp host not ready",
+					])))
 					return
 				}
-				if let s = result as? String {
-					completion(.success(s))
-					return
+				wv.evaluateJavaScript(expression) { result, error in
+					if let error {
+						completion(.failure(error))
+						return
+					}
+					if let s = result as? String {
+						completion(.success(s))
+						return
+					}
+					completion(.failure(NSError(domain: "BeamioOpenPgp", code: -4, userInfo: [
+						NSLocalizedDescriptionKey: "unexpected js result",
+					])))
 				}
-				completion(.failure(NSError(domain: "BeamioOpenPgp", code: -4, userInfo: [
-					NSLocalizedDescriptionKey: "unexpected js result",
-				])))
 			}
+		}
+		if Thread.isMainThread {
+			invoke()
+		} else {
+			DispatchQueue.main.async(execute: invoke)
 		}
 	}
 
