@@ -560,49 +560,67 @@ public enum BeamioConetChatModule {
 	private static func handleInbound(plaintext: String, armorHash: String, viaDomain: String) {
 		guard let s = currentSession() else { return }
 		let host = BeamioOpenPgpHost.shared
-		guard let from = verifyEnvelope(plaintext: plaintext, host: host), !from.isEmpty else {
-			emitEvent(["type": "event:log", "level": "warn", "message": "inbound verify failed — drop"])
-			return
+		// Decrypt completes on the main thread and `host.verifyMessage` needs the
+		// main thread too. Never block on it with a semaphore (that deadlocked for
+		// 8 s and every inbound message was dropped as "verify failed").
+		verifyEnvelope(plaintext: plaintext, host: host) { from in
+			guard let from, !from.isEmpty else {
+				emitEvent(["type": "event:log", "level": "warn", "message": "inbound verify failed — drop"])
+				return
+			}
+			emitEvent([
+				"type": "event:message",
+				"payload": [
+					"line": plaintext,
+					"from": from,
+					"armorHash": armorHash,
+					"viaDomain": viaDomain,
+					"plain": false,
+				],
+			])
+			emitDualReceipts(session: s, plaintext: plaintext, armorHash: armorHash, from: from)
 		}
-		emitEvent([
-			"type": "event:message",
-			"payload": [
-				"line": plaintext,
-				"from": from,
-				"armorHash": armorHash,
-				"viaDomain": viaDomain,
-				"plain": false,
-			],
-		])
-		emitDualReceipts(session: s, plaintext: plaintext, armorHash: armorHash, from: from)
 	}
 
-	private static func verifyEnvelope(plaintext: String, host: BeamioOpenPgpHost) -> String? {
+	/// Recover the EIP-191 signer. A claimed `from` that differs from the signer
+	/// is rejected: the recovered address is the only trusted sender identity.
+	private static func verifyEnvelope(
+		plaintext: String,
+		host: BeamioOpenPgpHost,
+		completion: @escaping (String?) -> Void
+	) {
 		guard let data = plaintext.data(using: .utf8),
 		      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-		else { return nil }
+		else {
+			completion(nil)
+			return
+		}
 		let text: String
 		if let t = obj["text"] as? String {
 			text = t
 		} else if let inner = obj["message"] as? String {
 			text = inner
 		} else {
-			return nil
+			completion(nil)
+			return
 		}
 		let sig = String(obj["signMessage"] as? String ?? "")
-		guard !sig.isEmpty else { return nil }
-		let sem = DispatchSemaphore(value: 0)
-		var recovered: String?
+		guard !sig.isEmpty else {
+			completion(nil)
+			return
+		}
+		let claimed = (obj["from"] as? String)?.lowercased()
 		host.verifyMessage(text: text, signature: sig) { result in
-			if case .success(let addr) = result { recovered = addr }
-			sem.signal()
+			guard case .success(let recovered) = result else {
+				completion(nil)
+				return
+			}
+			if let claimed, !claimed.isEmpty, claimed != recovered.lowercased() {
+				completion(nil)
+				return
+			}
+			completion(recovered)
 		}
-		_ = sem.wait(timeout: .now() + 8)
-		if let claimed = obj["from"] as? String, let recovered,
-		   claimed.lowercased() == recovered.lowercased() {
-			return recovered
-		}
-		return recovered
 	}
 
 	private static func emitDualReceipts(session: Session, plaintext: String, armorHash: String, from: String) {
@@ -767,9 +785,20 @@ public enum BeamioConetChatModule {
 	}
 
 	private static func parseNodes(_ raw: [[String: Any]]) -> [Node] {
-		raw.compactMap { n in
-			let ip = String(n["ip"] as? String ?? "")
+		// The PWA `nodeInfo` carries `ip_addr`, native roster rows carry `ip`.
+		// A row with only a domain is resolved through the chain roster in the
+		// keychain; without an IP an entry can never be reached over HTTP.
+		var rosterIpByDomain: [String: String] = [:]
+		for kn in BeamioChatPgpKeychain.loadSiNodes() where !kn.domain.isEmpty {
+			rosterIpByDomain[kn.domain.uppercased()] = kn.ip
+		}
+		return raw.compactMap { n in
+			var ip = String(n["ip"] as? String ?? n["ip_addr"] as? String ?? "")
 			let domain = String(n["domain"] as? String ?? "")
+			if BeamioSiCipherPost.normalizeIp(ip) == nil, !domain.isEmpty,
+			   let known = rosterIpByDomain[domain.uppercased()] {
+				ip = known
+			}
 			guard !ip.isEmpty || !domain.isEmpty else { return nil }
 			return Node(
 				ip: ip,

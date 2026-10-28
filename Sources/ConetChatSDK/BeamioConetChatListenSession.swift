@@ -11,7 +11,7 @@ public final class BeamioConetChatListenSession {
 	private var generation = 0
 	private var running = false
 	private var paused = false
-	private var sseTask: URLSessionDataTask?
+	private var sseTask: BeamioSiCipherPost.SseHandle?
 	private let retryMs: UInt64 = 6_000
 
 	func isRunning() -> Bool {
@@ -141,6 +141,7 @@ public final class BeamioConetChatListenSession {
 		for entry in entries {
 			guard stillAlive(gen: gen) else { return }
 			guard let entryIp = BeamioSiCipherPost.normalizeIp(entry.ip),
+			      !BeamioSiCipherPost.isMarkedUnreachable(entryIp),
 			      let url = BeamioSiCipherPost.postUrl(for: entryIp)
 			else { continue }
 
@@ -236,6 +237,16 @@ public final class BeamioConetChatListenSession {
 	) {
 		let trimmed = payload.trimmingCharacters(in: .whitespacesAndNewlines)
 		if trimmed.isEmpty { return }
+		// Length and shape only. Never log ciphertext or plaintext.
+		let isPgp = trimmed.contains("BEGIN PGP MESSAGE")
+		NSLog(
+			"[BeamioConetChat] sse event len=%ld pgp=%@ via=%@%@",
+			trimmed.count,
+			isPgp ? "yes" : "no",
+			viaDomain,
+			// Control frames (handshake / heartbeat) are plain JSON without secrets.
+			isPgp ? "" : " head=\(String(trimmed.prefix(300)))"
+		)
 
 		if let data = trimmed.data(using: .utf8),
 		   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -362,12 +373,28 @@ public final class BeamioConetChatListenSession {
 
 	static func findInboundArmor(_ payload: String) -> String? {
 		let trimmed = payload.trimmingCharacters(in: .whitespacesAndNewlines)
+		// JSON first: SI frames carry the armor as an escaped string (`\n`), so a
+		// raw substring of the frame is NOT a valid armor and OpenPGP.js rejects it
+		// with "Misformed armored text".
+		if trimmed.hasPrefix("{") || trimmed.hasPrefix("["),
+		   let obj = jsonObject(trimmed),
+		   let found = walkArmor(obj, depth: 0) {
+			return found
+		}
 		if trimmed.contains("BEGIN PGP MESSAGE") {
+			var raw = trimmed
 			if let start = trimmed.range(of: "-----BEGIN PGP MESSAGE-----"),
 			   let end = trimmed.range(of: "-----END PGP MESSAGE-----") {
-				return String(trimmed[start.lowerBound ..< end.upperBound])
+				raw = String(trimmed[start.lowerBound ..< end.upperBound])
 			}
-			return trimmed
+			// Armor lifted out of a JSON string still has literal `\n` / `\r` escapes.
+			if !raw.contains("\n") {
+				raw = raw
+					.replacingOccurrences(of: "\\r\\n", with: "\n")
+					.replacingOccurrences(of: "\\n", with: "\n")
+					.replacingOccurrences(of: "\\r", with: "\n")
+			}
+			return raw
 		}
 		guard let obj = jsonObject(trimmed) else { return nil }
 		return walkArmor(obj, depth: 0)

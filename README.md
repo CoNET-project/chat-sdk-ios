@@ -85,7 +85,7 @@ Crypto scripts ship inside the SPM target (`Resources/ChatCrypto`). `BeamioOpenP
 | `BeamioConetChatModule` | `handleCommand` — init / send / listen / history / mailbox / pause / destroy |
 | `BeamioConetChatSignBroker` | `requestEip191` / `requestEip712` (internal) + `fulfill(fromWeb:)` |
 | `BeamioOpenPgpHost` | Shared OpenPGP host (`shared.ensureReady`) |
-| `BeamioSiCipherPost` | HTTP `/post` and SSE to SI nodes by IP |
+| `BeamioSiCipherPost` | Plain HTTP/1.1 `/post` and SSE to SI nodes by IP over TCP port 80 (Network.framework, not URLSession: ATS rejects `http://IP` with `-1022`). `getRandomNode` returns only IP-reachable entries, weighted by `scoreEntry`; unreachable IPs are withheld for 120 s |
 | `BeamioChatPgpKeychain` | Persist user PGP + route key + SI node roster |
 | `BeamioConetChatListenSession` | Mailbox SSE session (used by the module) |
 | `BeamioConetChatHistoryStore` | Fragment encrypt + registry pointer updates |

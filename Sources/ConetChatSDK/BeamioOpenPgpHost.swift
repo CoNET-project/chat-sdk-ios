@@ -355,18 +355,35 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler {
 					])))
 					return
 				}
-				wv.evaluateJavaScript(expression) { result, error in
-					if let error {
-						completion(.failure(error))
-						return
+				// Every expression is an `(async () => { ... })()` Promise. Plain
+				// `evaluateJavaScript` cannot return a Promise and fails with
+				// "JavaScript execution returned a result of an unsupported type",
+				// which kept mailbox_listen in a permanent reconnect loop.
+				// `callAsyncJavaScript` awaits it and hands back the resolved value.
+				wv.callAsyncJavaScript(
+					"return await (\(expression));",
+					arguments: [:],
+					in: nil,
+					in: .page
+				) { outcome in
+					switch outcome {
+					case .failure(let error):
+						// WebKit's localizedDescription is only "A JavaScript exception
+						// occurred"; the real text is in WKJavaScriptExceptionMessage.
+						let ns = error as NSError
+						let detail = (ns.userInfo["WKJavaScriptExceptionMessage"] as? String) ?? ns.localizedDescription
+						completion(.failure(NSError(domain: "BeamioOpenPgp", code: ns.code, userInfo: [
+							NSLocalizedDescriptionKey: detail,
+						])))
+					case .success(let value):
+						if let s = value as? String {
+							completion(.success(s))
+						} else {
+							completion(.failure(NSError(domain: "BeamioOpenPgp", code: -4, userInfo: [
+								NSLocalizedDescriptionKey: "unexpected js result",
+							])))
+						}
 					}
-					if let s = result as? String {
-						completion(.success(s))
-						return
-					}
-					completion(.failure(NSError(domain: "BeamioOpenPgp", code: -4, userInfo: [
-						NSLocalizedDescriptionKey: "unexpected js result",
-					])))
 				}
 			}
 		}
