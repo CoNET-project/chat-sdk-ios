@@ -582,8 +582,8 @@ public enum BeamioConetChatModule {
 		}
 	}
 
-	/// Recover the EIP-191 signer. A claimed `from` that differs from the signer
-	/// is rejected: the recovered address is the only trusted sender identity.
+	/// Recover the EIP-191 signer: the recovered address is the only trusted
+	/// sender identity. A differing claimed `from` is passed on for the app to flag.
 	private static func verifyEnvelope(
 		plaintext: String,
 		host: BeamioOpenPgpHost,
@@ -609,13 +609,11 @@ public enum BeamioConetChatModule {
 			completion(nil)
 			return
 		}
-		let claimed = (obj["from"] as? String)?.lowercased()
+		// The recovered signer is the sender. A claimed `from` that differs is not
+		// dropped here: the app keeps the message under the signer and shows a
+		// warning for the false claim.
 		host.verifyMessage(text: text, signature: sig) { result in
 			guard case .success(let recovered) = result else {
-				completion(nil)
-				return
-			}
-			if let claimed, !claimed.isEmpty, claimed != recovered.lowercased() {
 				completion(nil)
 				return
 			}
