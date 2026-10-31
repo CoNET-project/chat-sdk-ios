@@ -97,6 +97,7 @@ Type names keep the `Beamio*` prefix so existing Consumer shell call sites can s
 - **Send:** encrypt to recipient **user PGP** → POST via healthy entry **A ≠ B**.
 - **Listen:** encrypt `mailbox_listen` to mailbox **B route PGP** → HTTP/SSE via entry **C ≠ B**.
 - **History:** AES-GCM fragments on IPFS; head pointer on CoNET `ChatIndexRegistry` `0x1511Caa71081C84d8a591490D1b83879088EED72` (chainId `224422`). Keys are derived from PWA EIP-191 signatures through the sign broker.
+  Wire-compatible with the TypeScript worker and `chat-sdk-android` indexes. `init` answers `{ historyApi: 2 }` before the history key is derived (the module logs `[history] ready` when it is); `historyLoad` streams `event:historyBuffer` batches (tail first), `historyRead` answers an array, `historyAppend` is idempotent per `sendId` and syncs the chain head first.
 - Do **not** put signing material, mnemonics, or full PGP armor in logs.
 
 Aligned with Beamio / CoNET rules: `beamio-conet-chat-protocol`, `conet-p2p-mailbox-routing-protocol`, `beamio-chat-history-decentralized-protocol`, and the TypeScript `@conet.project/chat-sdk`.

@@ -122,6 +122,7 @@ public enum BeamioConetChatModule {
 		}
 		lock.lock()
 		listen.stop()
+		session?.history?.destroy()
 		session?.history = nil
 		let s = Session()
 		session = s
@@ -186,10 +187,11 @@ public enum BeamioConetChatModule {
 					emitEvent(["type": "event:log", "level": level, "message": msg])
 				}
 			)
-			s.history?.prepare { _ in
-				emitEvent(["type": "ready", "reqId": reqId])
-				startListen(session: s)
-			}
+			// Listen first: it must not wait on the (sign-dependent) history key derivation.
+			// `historyApi: 2` = streamed `event:historyBuffer`, array `historyRead`, sendId-idempotent append.
+			emitEvent(["type": "ready", "reqId": reqId, "result": ["historyApi": 2]])
+			startListen(session: s)
+			s.history?.prepare { _ in }
 		}
 	}
 
@@ -424,33 +426,40 @@ public enum BeamioConetChatModule {
 
 	private static func handleHistoryLoad(_ body: [String: Any]) {
 		let reqId = body["reqId"] as? Int ?? 0
-		guard let hist = currentSession()?.history else {
-			ack(reqId, ok: false, error: "history_not_ready")
+		guard let hist = currentSession()?.history, hist.isReady() else {
+			// History key derivation (two PWA signatures) may still be in flight: not an error.
+			ack(reqId, ok: true)
 			return
 		}
-		hist.load(options: body["options"] as? [String: Any]) { entries in
-			ack(reqId, ok: true, result: ["entries": entries])
-			emitEvent(["type": "event:history", "payload": ["kind": "load", "entries": entries]])
-		}
+		hist.load(
+			options: body["options"] as? [String: Any],
+			emitBuffer: { peer, entries, isTail in
+				emitEvent([
+					"type": "event:historyBuffer",
+					"payload": ["peer": peer, "entries": entries.map(\.json), "isTail": isTail],
+				])
+			},
+			done: { ack(reqId, ok: true) }
+		)
 	}
 
 	private static func handleHistoryRead(_ body: [String: Any]) {
 		let reqId = body["reqId"] as? Int ?? 0
-		guard let hist = currentSession()?.history else {
-			ack(reqId, ok: false, error: "history_not_ready")
+		guard let hist = currentSession()?.history, hist.isReady() else {
+			ack(reqId, ok: true, result: [[String: Any]]())
 			return
 		}
 		hist.read(options: body["options"] as? [String: Any]) { entries in
-			ack(reqId, ok: true, result: ["entries": entries])
+			ack(reqId, ok: true, result: entries.map(\.json))
 		}
 	}
 
 	private static func handleHistoryAppend(_ body: [String: Any]) {
 		let reqId = body["reqId"] as? Int ?? 0
-		guard let hist = currentSession()?.history,
+		guard let hist = currentSession()?.history, hist.isReady(),
 		      let entry = body["entry"] as? [String: Any]
 		else {
-			ack(reqId, ok: false, error: "bad_append")
+			ack(reqId, ok: false, error: "history_not_ready")
 			return
 		}
 		hist.append(entry: entry) { ok in
@@ -561,6 +570,7 @@ public enum BeamioConetChatModule {
 		BeamioConetChatSignBroker.cancelAll(reason: "destroyed")
 		lock.lock()
 		session?.destroyed = true
+		session?.history?.destroy()
 		session?.history = nil
 		session = nil
 		voiceSessions.removeAll()
