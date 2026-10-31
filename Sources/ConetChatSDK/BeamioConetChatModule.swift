@@ -39,7 +39,17 @@ public enum BeamioConetChatModule {
 		public var chainId: Int = 224422
 		public var history: BeamioConetChatHistoryStore?
 		public var destroyed = false
+		/// The app confirms each inbound message with `ackInbound` after it has
+		/// stored it. Until then the mailbox keeps its offline copy, so a message
+		/// is not lost when the page is starting, suspended or killed.
+		public var deferAck = false
+		/// armorHash → message waiting for the app's `ackInbound`. Guarded by `pendingLock`.
+		var pendingAcks: [String: (plaintext: String, from: String, at: Date)] = [:]
+		let pendingLock = NSLock()
 	}
+
+	/// Unconfirmed for this long: forget it without ACK; the mailbox redelivers it later.
+	private static let pendingAckTTL: TimeInterval = 600
 
 	private static let lock = NSLock()
 	private static var session: Session?
@@ -91,6 +101,8 @@ public enum BeamioConetChatModule {
 		case "pause":
 			listen.pause()
 			emitEvent(["type": "event:status", "payload": ["status": "idle", "detail": "paused"]])
+		case "ackInbound":
+			handleAckInbound(body)
 		case "resume":
 			resumeListen()
 		case "destroy":
@@ -137,6 +149,7 @@ public enum BeamioConetChatModule {
 		s.ipfsWriteBaseUrl = String(payload["ipfsWriteBaseUrl"] as? String ?? "")
 		s.apiBaseUrl = String(payload["apiBaseUrl"] as? String ?? s.apiBaseUrl)
 		s.chatIndexRegistryAddress = String(payload["chatIndexRegistryAddress"] as? String ?? s.chatIndexRegistryAddress)
+		s.deferAck = (payload["deferAck"] as? Bool) == true
 		if let cid = payload["chainId"] as? Int { s.chainId = cid }
 		else if let cid = payload["chainId"] as? NSNumber { s.chainId = cid.intValue }
 
@@ -578,7 +591,30 @@ public enum BeamioConetChatModule {
 					"plain": false,
 				],
 			])
-			emitDualReceipts(session: s, plaintext: plaintext, armorHash: armorHash, from: from)
+			if s.deferAck, !armorHash.isEmpty {
+				let now = Date()
+				s.pendingLock.lock()
+				s.pendingAcks = s.pendingAcks.filter { now.timeIntervalSince($0.value.at) < pendingAckTTL }
+				s.pendingAcks[armorHash] = (plaintext, from, now)
+				s.pendingLock.unlock()
+			} else {
+				emitDualReceipts(session: s, plaintext: plaintext, armorHash: armorHash, from: from)
+			}
+		}
+	}
+
+	/// The app stored these messages: now send the mailbox ACK (deletes the
+	/// offline copy) and the sender's delivery receipt.
+	private static func handleAckInbound(_ body: [String: Any]) {
+		guard let s = currentSession() else { return }
+		var hashes = (body["armorHashes"] as? [String]) ?? []
+		if let one = body["armorHash"] as? String, !one.isEmpty { hashes.append(one) }
+		for hash in hashes where !hash.isEmpty {
+			s.pendingLock.lock()
+			let pending = s.pendingAcks.removeValue(forKey: hash)
+			s.pendingLock.unlock()
+			guard let pending else { continue }
+			emitDualReceipts(session: s, plaintext: pending.plaintext, armorHash: hash, from: pending.from)
 		}
 	}
 
