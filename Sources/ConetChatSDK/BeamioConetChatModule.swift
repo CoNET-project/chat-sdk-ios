@@ -482,6 +482,13 @@ public enum BeamioConetChatModule {
 			ack(reqId, ok: false, error: "bad_mailbox_command")
 			return
 		}
+		// Voice commands never carry a wallet or wallet signature.
+		if let name = command["command"] as? String, name.hasPrefix("voice_") {
+			postOpaqueVoiceCommand(session: s, routerArmoredPublicKey: routeKey, command: command) { ok in
+				ack(reqId, ok: true, result: ["ok": ok])
+			}
+			return
+		}
 		postSignedMailboxCommand(session: s, routerArmoredPublicKey: routeKey, command: command) { ok, _ in
 			ack(reqId, ok: true, result: ["ok": ok])
 		}
@@ -529,8 +536,75 @@ public enum BeamioConetChatModule {
 			ack(reqId, ok: false, error: "bad_voice_frame")
 			return
 		}
-		postSignedMailboxCommand(session: s, routerArmoredPublicKey: routeKey, command: frame) { ok, _ in
+		guard let command = opaqueVoiceUplinkCommand(frame: frame) else {
+			ack(reqId, ok: false, error: "bad_voice_frame")
+			return
+		}
+		postOpaqueVoiceCommand(session: s, routerArmoredPublicKey: routeKey, command: command) { ok in
 			ack(reqId, ok: true, result: ["sent": ok])
+		}
+	}
+
+	/// Rebuild a PWA voice frame as the route command the peer's mailbox reads.
+	///
+	/// Allow-list only: the PWA frame carries `to` (the peer wallet), and the
+	/// relay routes by session id alone (CoNET Chat protocol rules 18–21). Same
+	/// shape as the native shells and the PWA worker SDK send.
+	static func opaqueVoiceUplinkCommand(frame: [String: Any]) -> [String: Any]? {
+		let callId = String(frame["callId"] as? String ?? "").trimmingCharacters(in: .whitespaces)
+		let sessionId = String(frame["sessionId"] as? String ?? "").trimmingCharacters(in: .whitespaces)
+		let targetSessionId = String(frame["targetSessionId"] as? String ?? "").trimmingCharacters(in: .whitespaces)
+		guard !callId.isEmpty, !sessionId.isEmpty, !targetSessionId.isEmpty,
+		      let payload = frame["payload"] as? String, !payload.isEmpty,
+		      let seq = (frame["seq"] as? NSNumber)?.int64Value, seq >= 0
+		else { return nil }
+		let nowSec = Int(Date().timeIntervalSince1970)
+		var command: [String: Any] = [
+			"command": "voice_uplink",
+			"type": "voice_frame_v1",
+			"callId": callId,
+			"sessionId": sessionId,
+			"targetSessionId": targetSessionId,
+			"direction": (frame["direction"] as? String) ?? "uplink",
+			"seq": seq,
+			"frameTimestamp": frame["frameTimestamp"] ?? frame["timestamp"] ?? nowSec,
+			"payload": payload,
+			"timestamp": nowSec,
+		]
+		for key in ["mediaKind", "frameId", "chunkIndex", "chunkCount"] {
+			if let value = frame[key] { command[key] = value }
+		}
+		return command
+	}
+
+	/// Voice route command: unsigned, no wallet. A wallet signature would let
+	/// the mailbox recover the sender's wallet, and the node does not ask for
+	/// one (sessionId is the capability). JSON → base64 → route PGP → entry ≠ B.
+	private static func postOpaqueVoiceCommand(
+		session: Session,
+		routerArmoredPublicKey: String,
+		command: [String: Any],
+		completion: @escaping (_ ok: Bool) -> Void
+	) {
+		var cmd = command
+		for key in ["walletAddress", "billingWallet", "from", "to"] { cmd.removeValue(forKey: key) }
+		if cmd["timestamp"] == nil { cmd["timestamp"] = Int(Date().timeIntervalSince1970) }
+		guard let data = try? JSONSerialization.data(withJSONObject: cmd) else {
+			completion(false)
+			return
+		}
+		BeamioOpenPgpHost.shared.encrypt(
+			plaintext: data.base64EncodedString(),
+			publicKeyArmor: routerArmoredPublicKey
+		) { result in
+			guard case .success(let armor) = result, armor.contains("BEGIN PGP MESSAGE") else {
+				completion(false)
+				return
+			}
+			DispatchQueue.global(qos: .userInitiated).async {
+				let ok = postToEntriesSync(armor: armor, mailboxRoute: routerArmoredPublicKey, session: session)
+				DispatchQueue.main.async { completion(ok) }
+			}
 		}
 	}
 
