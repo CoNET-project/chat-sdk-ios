@@ -1,6 +1,9 @@
 import Foundation
 
-/// 1B: native asks PWA main thread to EIP-191 / EIP-712 sign; never holds EOA hex.
+/// Signing for the module. With a wallet key from the page (kept in
+/// `BeamioChatWalletKeychain`) the module signs locally, so a VoIP push can open
+/// the mailbox listen without the page. Without one it falls back to 1B: it asks
+/// the PWA main thread to EIP-191 / EIP-712 sign.
 public enum BeamioConetChatSignBroker {
 	public typealias WebEmit = (_ payload: [String: Any]) -> Void
 
@@ -8,6 +11,30 @@ public enum BeamioConetChatSignBroker {
 	private static var pending: [String: (Bool, String?, String?) -> Void] = [:]
 	private static var emit: WebEmit?
 	private static let defaultTimeout: TimeInterval = 30
+	/// Local signer key (memory only). Guarded by `lock`.
+	private static var localKey = ""
+
+	public static func setLocalSigner(privateKeyHex: String) {
+		lock.lock()
+		localKey = BeamioChatWalletKeychain.normalizeKey(privateKeyHex)
+		lock.unlock()
+	}
+
+	public static func clearLocalSigner() {
+		lock.lock()
+		localKey = ""
+		lock.unlock()
+	}
+
+	public static func hasLocalSigner() -> Bool {
+		lock.lock(); defer { lock.unlock() }
+		return !localKey.isEmpty
+	}
+
+	private static func currentLocalKey() -> String {
+		lock.lock(); defer { lock.unlock() }
+		return localKey
+	}
 
 	public static func setWebEmit(_ emit: WebEmit?) {
 		lock.lock()
@@ -21,6 +48,11 @@ public enum BeamioConetChatSignBroker {
 		timeout: TimeInterval = 30,
 		completion: @escaping (Result<String, Error>) -> Void
 	) {
+		let key = currentLocalKey()
+		if !key.isEmpty {
+			BeamioOpenPgpHost.shared.signEip191(privateKeyHex: key, message: message, completion: completion)
+			return
+		}
 		request(kind: "eip191", message: message, typedData: nil, timeout: timeout, completion: completion)
 	}
 
@@ -30,6 +62,11 @@ public enum BeamioConetChatSignBroker {
 		timeout: TimeInterval = 30,
 		completion: @escaping (Result<String, Error>) -> Void
 	) {
+		let key = currentLocalKey()
+		if !key.isEmpty {
+			BeamioOpenPgpHost.shared.signEip712(privateKeyHex: key, typedData: typedData, completion: completion)
+			return
+		}
 		request(kind: "eip712", message: nil, typedData: typedData, timeout: timeout, completion: completion)
 	}
 

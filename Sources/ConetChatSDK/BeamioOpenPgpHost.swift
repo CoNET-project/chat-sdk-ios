@@ -87,6 +87,70 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler {
 		)
 	}
 
+	// MARK: - Local wallet signer (key from BeamioChatWalletKeychain; never logged)
+
+	/// EIP-191 `personal_sign` of `message` with `privateKeyHex`.
+	public func signEip191(privateKeyHex: String, message: String, completion: @escaping (Result<String, Error>) -> Void) {
+		runJs(
+			"""
+			(async () => {
+			  const w = new ethers.Wallet('0x' + \(jsString(privateKeyHex)));
+			  return await w.signMessage(\(jsString(message)));
+			})()
+			""",
+			completion: { completion(Self.signatureOrError($0)) }
+		)
+	}
+
+	/// EIP-712 signature of `{ domain, types, primaryType, message|value }`.
+	public func signEip712(privateKeyHex: String, typedData: [String: Any], completion: @escaping (Result<String, Error>) -> Void) {
+		guard let data = try? JSONSerialization.data(withJSONObject: typedData),
+		      let json = String(data: data, encoding: .utf8)
+		else {
+			completion(.failure(Self.localSignError))
+			return
+		}
+		runJs(
+			"""
+			(async () => {
+			  const td = JSON.parse(\(jsString(json)));
+			  const types = Object.assign({}, td.types || {});
+			  delete types.EIP712Domain;
+			  const value = td.value || td.message;
+			  if (!td.domain || !value) throw new Error('bad_typed_data');
+			  const w = new ethers.Wallet('0x' + \(jsString(privateKeyHex)));
+			  return await w.signTypedData(td.domain, types, value);
+			})()
+			""",
+			completion: { completion(Self.signatureOrError($0)) }
+		)
+	}
+
+	/// Lower-case address of `privateKeyHex`.
+	public func walletAddress(privateKeyHex: String, completion: @escaping (Result<String, Error>) -> Void) {
+		runJs(
+			"""
+			(async () => {
+			  return String(new ethers.Wallet('0x' + \(jsString(privateKeyHex))).address).toLowerCase();
+			})()
+			""",
+			completion: { result in
+				if case .success(let a) = result, a.hasPrefix("0x") { completion(.success(a)) }
+				else { completion(.failure(Self.localSignError)) }
+			}
+		)
+	}
+
+	private static let localSignError = NSError(domain: "BeamioOpenPgp", code: -10, userInfo: [
+		NSLocalizedDescriptionKey: "local_sign_failed",
+	])
+
+	/// Never pass the JS error text on: it could quote its input.
+	private static func signatureOrError(_ result: Result<String, Error>) -> Result<String, Error> {
+		if case .success(let sig) = result, sig.hasPrefix("0x") { return .success(sig) }
+		return .failure(localSignError)
+	}
+
 	/// 1B: PWA already signed `message`; encrypt `{message,signMessage}` base64 → route PGP.
 	public func encryptSignedRouteCommand(
 		message: String,

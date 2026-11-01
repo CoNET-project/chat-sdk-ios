@@ -202,6 +202,15 @@ public enum BeamioChatPgpKeychain {
 		return String(data: data, encoding: .utf8)
 	}
 
+	/// Logout / wallet switch: forget the PGP key, route key, roster and wallet binding.
+	public static func clear() {
+		let base: [String: Any] = [
+			kSecClass as String: kSecClassGenericPassword,
+			kSecAttrService as String: service,
+		]
+		SecItemDelete(base as CFDictionary)
+	}
+
 	private static func read(account: String) -> String? {
 		let query: [String: Any] = [
 			kSecClass as String: kSecClassGenericPassword,

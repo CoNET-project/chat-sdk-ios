@@ -5,7 +5,8 @@ public final class BeamioConetChatListenSession {
 	public init() {}
 
 	typealias StatusHandler = (_ status: String, _ detail: String?) -> Void
-	typealias InboundHandler = (_ plaintext: String, _ armorHash: String, _ viaDomain: String) -> Void
+	/// `armor` is the inbound OpenPGP armor (still encrypted to the user key), kept for the inbox store.
+	typealias InboundHandler = (_ plaintext: String, _ armorHash: String, _ viaDomain: String, _ armor: String) -> Void
 
 	private let lock = NSLock()
 	private var generation = 0
@@ -14,9 +15,16 @@ public final class BeamioConetChatListenSession {
 	private var sseTask: BeamioSiCipherPost.SseHandle?
 	private let retryMs: UInt64 = 6_000
 
+	/// Started and not stopped (it may be paused).
 	func isRunning() -> Bool {
 		lock.lock(); defer { lock.unlock() }
 		return running
+	}
+
+	/// Started, not stopped and not paused.
+	func isListening() -> Bool {
+		lock.lock(); defer { lock.unlock() }
+		return running && !paused
 	}
 
 	func pause() {
@@ -265,24 +273,37 @@ public final class BeamioConetChatListenSession {
 		      armored.contains("BEGIN PGP MESSAGE")
 		else { return }
 
+		Self.decryptArmor(session: session, armored: armored) { line, hash in
+			onInbound(line, hash, viaDomain, armored)
+		}
+	}
+
+	/// Decrypt one inbound armor with the session PGP key into the chat line the
+	/// app expects (with `_beamioPgpArmorHash`). Also replays the inbox store.
+	/// Never logs plaintext.
+	static func decryptArmor(
+		session: BeamioConetChatModule.Session,
+		armored: String,
+		onLine: @escaping (_ line: String, _ armorHash: String) -> Void
+	) {
 		BeamioOpenPgpHost.shared.decryptInboundArmor(
 			privateKeyArmor: session.pgpPrivateKeyArmored,
 			armor: armored
 		) { result in
 			switch result {
-			case .failure(let err):
-				NSLog("[BeamioConetChat] inbound decrypt: %@", err.localizedDescription)
+			case .failure:
+				NSLog("[BeamioConetChat] inbound decrypt failed")
 			case .success(let dec):
-				var line = Self.normalizeInboundPlaintext(dec.text)
+				var line = normalizeInboundPlaintext(dec.text)
 				if line.isEmpty { return }
-				if var env = Self.jsonObject(line) {
+				if var env = jsonObject(line) {
 					env["_beamioPgpArmorHash"] = dec.armorHash
 					if let data = try? JSONSerialization.data(withJSONObject: env),
 					   let s = String(data: data, encoding: .utf8) {
 						line = s
 					}
 				}
-				onInbound(line, dec.armorHash, viaDomain)
+				onLine(line, dec.armorHash)
 			}
 		}
 	}

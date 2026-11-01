@@ -57,6 +57,27 @@ public enum BeamioConetChatModule {
 	private static let listen = BeamioConetChatListenSession()
 	private static var voiceSessions = Set<String>()
 
+	/// Shell hook: sees every module event (messages included) even when no
+	/// page is attached, so the shell can act on a caller's cancel natively.
+	/// Called on the main queue.
+	public static var nativeObserver: WebEmit?
+
+	/// Shell hook: `true` while a call rings or is up. The page's `pause` is
+	/// then deferred: the mailbox listen stays connected until the call ends.
+	/// Called on the main queue.
+	public static var keepListenWhile: (() -> Bool)?
+
+	/// Shell call layer: a verified peer call-control message arrived over Chat
+	/// (type, callId, sessionId, recovered signer). Called on the main queue.
+	public static var callControlObserver: ((_ type: String, _ callId: String, _ sessionId: String, _ from: String) -> Void)?
+
+	/// A pause is owed once `keepListenWhile` turns false. Main queue only.
+	private static var pauseOwed = false
+	/// Last listen status was `listening` (connected).
+	private static var listenConnected = false
+	private static var idleCheckPosted = false
+	private static let idleCheckInterval: TimeInterval = 10
+
 	public static func handleCommand(_ body: [String: Any], emit: @escaping WebEmit) {
 		self.emit = emit
 		BeamioConetChatSignBroker.setWebEmit(emit)
@@ -99,14 +120,18 @@ public enum BeamioConetChatModule {
 		case "voiceUnlisten":
 			handleVoiceUnlisten(body)
 		case "pause":
-			listen.pause()
-			emitEvent(["type": "event:status", "payload": ["status": "idle", "detail": "paused"]])
+			DispatchQueue.main.async { requestPause() }
 		case "ackInbound":
 			handleAckInbound(body)
 		case "resume":
+			DispatchQueue.main.async { pauseOwed = false }
 			resumeListen()
 		case "destroy":
 			destroy()
+		case "clearIdentity":
+			clearIdentity(reqId: body["reqId"] as? Int ?? -1)
+		case "provisionIdentity":
+			provisionIdentity(body)
 		default:
 			NSLog("[BeamioConetChat] unknown command %@", type)
 		}
@@ -120,13 +145,27 @@ public enum BeamioConetChatModule {
 			ack(reqId, ok: false, error: "missing_payload")
 			return
 		}
-		lock.lock()
-		listen.stop()
-		session?.history?.destroy()
-		session?.history = nil
-		let s = Session()
-		session = s
-		lock.unlock()
+		let identityRaw = payload["identity"] as? [String: Any]
+		let idEoa = normalizeAddress(String(identityRaw?["eoaAddress"] as? String ?? identityRaw?["eoa"] as? String ?? ""))
+		let walletKey = BeamioChatWalletKeychain.normalizeKey(identityRaw?["privateKeyHex"] as? String)
+		// A listen started without the page (VoIP push) for this wallet: the page
+		// takes it over as it is. No reconnect; the messages it holds unconfirmed
+		// are handed to the page below.
+		let running = currentSession()
+		let attach = running != nil && !idEoa.isEmpty && running?.eoa == idEoa && listen.isRunning()
+		let s: Session
+		if attach, let running {
+			s = running
+		} else {
+			lock.lock()
+			listen.stop()
+			session?.history?.destroy()
+			session?.history = nil
+			s = Session()
+			session = s
+			lock.unlock()
+		}
+		DispatchQueue.main.async { pauseOwed = false }
 
 		if let identity = payload["identity"] as? [String: Any] {
 			s.eoa = normalizeAddress(String(identity["eoaAddress"] as? String ?? identity["eoa"] as? String ?? ""))
@@ -150,7 +189,7 @@ public enum BeamioConetChatModule {
 		s.ipfsWriteBaseUrl = String(payload["ipfsWriteBaseUrl"] as? String ?? "")
 		s.apiBaseUrl = String(payload["apiBaseUrl"] as? String ?? s.apiBaseUrl)
 		s.chatIndexRegistryAddress = String(payload["chatIndexRegistryAddress"] as? String ?? s.chatIndexRegistryAddress)
-		s.deferAck = (payload["deferAck"] as? Bool) == true
+		s.deferAck = (payload["deferAck"] as? Bool) == true || (attach && s.deferAck)
 		if let cid = payload["chainId"] as? Int { s.chainId = cid }
 		else if let cid = payload["chainId"] as? NSNumber { s.chainId = cid.intValue }
 
@@ -167,13 +206,63 @@ public enum BeamioConetChatModule {
 			ack(reqId, ok: false, error: "missing_identity")
 			return
 		}
+		// A VoIP push reads the PGP key, route key and wallet from the Keychain.
+		_ = BeamioChatPgpKeychain.upsert(fromWeb: [
+			"privateKeyArmor": s.pgpPrivateKeyArmored,
+			"publicKeyArmor": s.pgpPublicKeyArmored,
+			"routePublicKeyArmor": s.ownRouteArmoredPublicKey,
+			"eoa": s.eoa,
+		])
+		if !s.nodes.isEmpty, BeamioChatPgpKeychain.loadSiNodes().isEmpty {
+			_ = BeamioChatPgpKeychain.storeChainRoster(
+				nodes: s.nodes.map { $0.asKeychainNode() },
+				mailboxIp: s.mailboxIp.isEmpty ? nil : s.mailboxIp
+			)
+		}
 
 		BeamioOpenPgpHost.shared.ensureReady { ok in
 			guard ok else {
 				ack(reqId, ok: false, error: "openpgp_not_ready")
 				return
 			}
+			adoptWalletKey(eoa: s.eoa, walletKey: walletKey) {
+				finishInit(reqId: reqId, session: s, attach: attach)
+			}
+		}
+	}
+
+	/// Sign locally from now on. A key from the page is checked against the
+	/// session wallet and stored; without one, a stored key for the same wallet
+	/// is used; otherwise signing falls back to the page.
+	private static func adoptWalletKey(eoa: String, walletKey: String, done: @escaping () -> Void) {
+		if walletKey.isEmpty {
+			if let stored = BeamioChatWalletKeychain.load(), stored.eoa == eoa {
+				BeamioConetChatSignBroker.setLocalSigner(privateKeyHex: stored.privateKeyHex)
+			} else {
+				// Another wallet's key must not stay behind after a switch.
+				if BeamioChatWalletKeychain.load() != nil { BeamioChatWalletKeychain.clear() }
+				BeamioConetChatSignBroker.clearLocalSigner()
+			}
+			done()
+			return
+		}
+		BeamioOpenPgpHost.shared.walletAddress(privateKeyHex: walletKey) { result in
+			if case .success(let addr) = result, addr == eoa {
+				let saved = BeamioChatWalletKeychain.save(eoa: eoa, privateKeyHex: walletKey)
+				BeamioConetChatSignBroker.setLocalSigner(privateKeyHex: walletKey)
+				NSLog("[BeamioConetChat] wallet signer local stored=%@", saved ? "yes" : "no")
+			} else {
+				NSLog("[BeamioConetChat] wallet key does not match the session wallet; page signs")
+				BeamioConetChatSignBroker.clearLocalSigner()
+			}
+			done()
+		}
+	}
+
+	private static func finishInit(reqId: Int, session s: Session, attach: Bool) {
+		do {
 			let host = BeamioOpenPgpHost.shared
+			s.history?.destroy()
 			s.history = BeamioConetChatHistoryStore(
 				eoa: s.eoa,
 				chainId: s.chainId,
@@ -190,9 +279,224 @@ public enum BeamioConetChatModule {
 			// Listen first: it must not wait on the (sign-dependent) history key derivation.
 			// `historyApi: 2` = streamed `event:historyBuffer`, array `historyRead`, sendId-idempotent append.
 			emitEvent(["type": "ready", "reqId": reqId, "result": ["historyApi": 2]])
-			startListen(session: s)
+			if attach {
+				s.pendingLock.lock()
+				let pending = s.pendingAcks
+				s.pendingLock.unlock()
+				NSLog("[BeamioConetChat] page attached to the running listen pending=%d", pending.count)
+				if listen.isListening() {
+					emitEvent(["type": "event:status", "payload": ["status": "listening", "detail": "attached"]])
+				} else {
+					resumeListen()
+				}
+				for (hash, p) in pending {
+					emitEvent([
+						"type": "event:message",
+						"payload": ["line": p.plaintext, "from": p.from, "armorHash": hash, "viaDomain": "", "plain": false],
+					])
+				}
+			} else {
+				startListen(session: s)
+			}
+			if s.deferAck { replayInbox(session: s) }
 			s.history?.prepare { _ in }
 		}
+	}
+
+	// MARK: - No-page start (VoIP push)
+
+	/// Open the mailbox listen from the stored identity, without the page: a
+	/// VoIP push woke the app. Messages go to `nativeObserver` and stay
+	/// unconfirmed (no mailbox ACK) until the page starts and stores them. An
+	/// existing session is only resumed. Returns false when no stored identity
+	/// can listen (no wallet key, PGP key, route key or roster).
+	@discardableResult
+	public static func startFromStore(reason: String) -> Bool {
+		if let existing = currentSession() {
+			if listen.isListening() && !listenConnected {
+				// Reconnecting (the app was suspended): retry now instead of
+				// waiting out the backoff.
+				NSLog("[BeamioConetChat] listen not connected; retrying now for %@", reason)
+				startListen(session: existing)
+			} else if !listen.isListening() {
+				NSLog("[BeamioConetChat] listen resumed for %@", reason)
+				DispatchQueue.main.async {
+					pauseOwed = true
+					postIdleCheck()
+				}
+				listen.resume(
+					session: existing,
+					onStatus: { status, detail in emitStatus(status, detail) },
+					onInbound: { p, h, v, a in handleInbound(plaintext: p, armorHash: h, viaDomain: v, armor: a) }
+				)
+			}
+			return true
+		}
+		guard let pgp = BeamioChatPgpKeychain.load(), pgp.hasUserPrivate,
+		      pgp.routePublicKeyArmor.contains("BEGIN PGP PUBLIC KEY"),
+		      let wallet = BeamioChatWalletKeychain.load()
+		else {
+			NSLog("[BeamioConetChat] no stored identity for a no-page listen (%@)", reason)
+			return false
+		}
+		if !pgp.eoa.isEmpty, normalizeAddress(pgp.eoa) != wallet.eoa {
+			NSLog("[BeamioConetChat] stored PGP and wallet belong to different wallets; no-page listen skipped")
+			return false
+		}
+		let nodes = pgp.siNodes.isEmpty ? BeamioChatPgpKeychain.loadSiNodes() : pgp.siNodes
+		guard !nodes.isEmpty else {
+			NSLog("[BeamioConetChat] no stored roster for a no-page listen (%@)", reason)
+			return false
+		}
+		let s = Session()
+		s.eoa = wallet.eoa
+		s.pgpPrivateKeyArmored = pgp.privateKeyArmor
+		s.pgpPublicKeyArmored = pgp.publicKeyArmor
+		s.ownRouteArmoredPublicKey = pgp.routePublicKeyArmor
+		s.mailboxIp = pgp.mailboxIp
+		s.nodes = nodes.map { Node(ip: $0.ip, domain: $0.domain, region: $0.region, armoredPublicKey: "") }
+		s.deferAck = true
+		lock.lock()
+		if session != nil {
+			lock.unlock()
+			return true
+		}
+		session = s
+		lock.unlock()
+		NSLog("[BeamioConetChat] no-page listen starting for %@", reason)
+		BeamioOpenPgpHost.shared.ensureReady { ok in
+			guard ok, currentSession() === s else { return }
+			BeamioConetChatSignBroker.setLocalSigner(privateKeyHex: wallet.privateKeyHex)
+			startListen(session: s)
+		}
+		DispatchQueue.main.async {
+			pauseOwed = true
+			postIdleCheck()
+		}
+		return true
+	}
+
+	// MARK: - Background pause vs. calls
+
+	/// Main queue.
+	private static func requestPause() {
+		if keepListenWhile?() == true {
+			NSLog("[BeamioConetChat] pause deferred: call in progress")
+			pauseOwed = true
+			postIdleCheck()
+			return
+		}
+		pauseOwed = false
+		listen.pause()
+		emitEvent(["type": "event:status", "payload": ["status": "idle", "detail": "paused"]])
+	}
+
+	/// Main queue.
+	private static func postIdleCheck() {
+		guard !idleCheckPosted else { return }
+		idleCheckPosted = true
+		DispatchQueue.main.asyncAfter(deadline: .now() + idleCheckInterval) {
+			idleCheckPosted = false
+			guard pauseOwed else { return }
+			if keepListenWhile?() == true {
+				postIdleCheck()
+			} else {
+				NSLog("[BeamioConetChat] call over; owed pause applied")
+				requestPause()
+			}
+		}
+	}
+
+	/// Logout / wallet removed or switched: stop and forget the stored keys.
+	private static func clearIdentity(reqId: Int) {
+		destroy()
+		BeamioConetChatSignBroker.clearLocalSigner()
+		BeamioChatWalletKeychain.clear()
+		BeamioChatPgpKeychain.clear()
+		BeamioConetChatInboxStore.clear()
+		NSLog("[BeamioConetChat] identity cleared")
+		ack(reqId, ok: true, result: ["ok": true])
+	}
+
+	/// Hand the page what the inbox store holds and the page has not been given
+	/// in this session (received while it was not running, or never confirmed).
+	private static func replayInbox(session s: Session) {
+		s.pendingLock.lock()
+		let given = Set(s.pendingAcks.keys)
+		s.pendingLock.unlock()
+		let stored = BeamioConetChatInboxStore.list().filter { !given.contains($0.armorHash) }
+		guard !stored.isEmpty else { return }
+		NSLog("[BeamioConetChat] inbox replay count=%d", stored.count)
+		for e in stored {
+			BeamioConetChatListenSession.decryptArmor(session: s, armored: e.armor) { line, hash in
+				handleInbound(plaintext: line, armorHash: hash, viaDomain: e.viaDomain, armor: e.armor)
+			}
+		}
+	}
+
+	/// `provisionIdentity`: the page hands over the wallet key and PGP key. The
+	/// wallet key must match `eoa`; both go to the Keychain (refused, not stored,
+	/// when that fails). Later listens sign locally.
+	private static func provisionIdentity(_ body: [String: Any]) {
+		let reqId = body["reqId"] as? Int ?? -1
+		let p = (body["payload"] as? [String: Any]) ?? body
+		let eoa = normalizeAddress(String(p["eoa"] as? String ?? p["eoaAddress"] as? String ?? ""))
+		let walletKey = BeamioChatWalletKeychain.normalizeKey(p["walletPrivateKey"] as? String ?? p["privateKeyHex"] as? String)
+		let pgpPrivate = String(p["pgpPrivateKeyArmored"] as? String ?? "")
+		guard !eoa.isEmpty, !walletKey.isEmpty, pgpPrivate.contains("BEGIN PGP PRIVATE KEY") else {
+			ack(reqId, ok: false, error: "bad_identity")
+			return
+		}
+		let pgpOk = BeamioChatPgpKeychain.upsert(fromWeb: [
+			"privateKeyArmor": pgpPrivate,
+			"publicKeyArmor": String(p["pgpPublicKeyArmored"] as? String ?? ""),
+			"routePublicKeyArmor": String(p["ownRoute"] as? String ?? p["ownRouteArmoredPublicKey"] as? String ?? ""),
+			"eoa": eoa,
+		])
+		BeamioOpenPgpHost.shared.ensureReady { ok in
+			guard ok else {
+				ack(reqId, ok: false, error: "openpgp_not_ready")
+				return
+			}
+			BeamioOpenPgpHost.shared.walletAddress(privateKeyHex: walletKey) { result in
+				guard case .success(let addr) = result, addr == eoa else {
+					ack(reqId, ok: false, error: "wallet_mismatch")
+					return
+				}
+				let saved = BeamioChatWalletKeychain.save(eoa: eoa, privateKeyHex: walletKey)
+				if saved && pgpOk { BeamioConetChatSignBroker.setLocalSigner(privateKeyHex: walletKey) }
+				NSLog("[BeamioConetChat] identity provisioned stored=%@", saved && pgpOk ? "yes" : "no")
+				if saved && pgpOk { ack(reqId, ok: true, result: ["ok": true]) }
+				else { ack(reqId, ok: false, error: "secure_store_failed") }
+			}
+		}
+	}
+
+	// MARK: - Call layer entry (no page involved)
+
+	/// Native call layer: a VoIP push arrived, a call rings or is up, or the app
+	/// came to the foreground. Opens / resumes the mailbox listen from the stored
+	/// identity. Same as `startFromStore`.
+	@discardableResult
+	public static func wake(reason: String) -> Bool {
+		startFromStore(reason: reason)
+	}
+
+	/// Native call layer: the call is over. Applies an owed background pause now.
+	public static func release(reason: String) {
+		DispatchQueue.main.async {
+			if pauseOwed, keepListenWhile?() != true {
+				NSLog("[BeamioConetChat] released (%@); owed pause applied", reason)
+				requestPause()
+			}
+		}
+	}
+
+	private static func emitStatus(_ status: String, _ detail: String?) {
+		listenConnected = status == "listening"
+		var payload: [String: Any] = ["status": status]
+		if let detail { payload["detail"] = detail }
+		emitEvent(["type": "event:status", "payload": payload])
 	}
 
 	private static func handleSetRoutes(_ body: [String: Any]) {
@@ -614,27 +918,31 @@ public enum BeamioConetChatModule {
 		listen.start(
 			session: session,
 			onStatus: { status, detail in
+				listenConnected = status == "listening"
 				var payload: [String: Any] = ["status": status]
 				if let detail { payload["detail"] = detail }
 				emitEvent(["type": "event:status", "payload": payload])
 			},
-			onInbound: { plaintext, armorHash, viaDomain in
-				handleInbound(plaintext: plaintext, armorHash: armorHash, viaDomain: viaDomain)
+			onInbound: { plaintext, armorHash, viaDomain, armor in
+				handleInbound(plaintext: plaintext, armorHash: armorHash, viaDomain: viaDomain, armor: armor)
 			}
 		)
 	}
 
 	private static func resumeListen() {
 		guard let s = currentSession() else { return }
+		// Already connected (or reconnecting by itself): do not restart it.
+		if listen.isListening() { return }
 		listen.resume(
 			session: s,
 			onStatus: { status, detail in
+				listenConnected = status == "listening"
 				var payload: [String: Any] = ["status": status]
 				if let detail { payload["detail"] = detail }
 				emitEvent(["type": "event:status", "payload": payload])
 			},
-			onInbound: { plaintext, armorHash, viaDomain in
-				handleInbound(plaintext: plaintext, armorHash: armorHash, viaDomain: viaDomain)
+			onInbound: { plaintext, armorHash, viaDomain, armor in
+				handleInbound(plaintext: plaintext, armorHash: armorHash, viaDomain: viaDomain, armor: armor)
 			}
 		)
 	}
@@ -654,7 +962,7 @@ public enum BeamioConetChatModule {
 
 	// MARK: - Inbound + dual receipts
 
-	private static func handleInbound(plaintext: String, armorHash: String, viaDomain: String) {
+	private static func handleInbound(plaintext: String, armorHash: String, viaDomain: String, armor: String) {
 		guard let s = currentSession() else { return }
 		let host = BeamioOpenPgpHost.shared
 		// Decrypt completes on the main thread and `host.verifyMessage` needs the
@@ -664,6 +972,11 @@ public enum BeamioConetChatModule {
 			guard let from, !from.isEmpty else {
 				emitEvent(["type": "event:log", "level": "warn", "message": "inbound verify failed — drop"])
 				return
+			}
+			if let sig = BeamioConetChatCallControl.parse(plaintext) {
+				DispatchQueue.main.async {
+					callControlObserver?(sig.type, sig.callId, sig.sessionId, from)
+				}
 			}
 			emitEvent([
 				"type": "event:message",
@@ -676,6 +989,10 @@ public enum BeamioConetChatModule {
 				],
 			])
 			if s.deferAck, !armorHash.isEmpty {
+				// On disk until the app confirms it: survives the page not running.
+				if !armor.isEmpty {
+					BeamioConetChatInboxStore.put(armorHash: armorHash, armor: armor, viaDomain: viaDomain)
+				}
 				let now = Date()
 				s.pendingLock.lock()
 				s.pendingAcks = s.pendingAcks.filter { now.timeIntervalSince($0.value.at) < pendingAckTTL }
@@ -693,6 +1010,7 @@ public enum BeamioConetChatModule {
 		guard let s = currentSession() else { return }
 		var hashes = (body["armorHashes"] as? [String]) ?? []
 		if let one = body["armorHash"] as? String, !one.isEmpty { hashes.append(one) }
+		BeamioConetChatInboxStore.remove(hashes)
 		for hash in hashes where !hash.isEmpty {
 			s.pendingLock.lock()
 			let pending = s.pendingAcks.removeValue(forKey: hash)
@@ -890,6 +1208,7 @@ public enum BeamioConetChatModule {
 	private static func emitEvent(_ payload: [String: Any]) {
 		let out: [String: Any] = ["action": "chatModuleEvent", "event": payload]
 		DispatchQueue.main.async {
+			nativeObserver?(out)
 			emit?(out)
 		}
 	}
