@@ -16,6 +16,21 @@ public final class BeamioConetChatListenSession {
 	private var paused = false
 	private var sseTask: BeamioSiCipherPost.SseHandle?
 	private let retryMs: UInt64 = 6_000
+	/// Last frame from the mailbox that opened with this listen's stream key.
+	private var lastSealedFrameAt = Date.distantPast
+
+	/// Seconds since the mailbox last spoke on this listen (handshake, keepalive,
+	/// message). Large after the app was suspended: the stream may be gone even
+	/// though nothing reported it.
+	private func heardMailbox(since: Date) -> Bool {
+		lock.lock(); defer { lock.unlock() }
+		return lastSealedFrameAt >= since
+	}
+
+	func secondsSinceLastMailboxFrame() -> TimeInterval {
+		lock.lock(); defer { lock.unlock() }
+		return Date().timeIntervalSince(lastSealedFrameAt)
+	}
 
 	/// Started and not stopped (it may be paused).
 	func isRunning() -> Bool {
@@ -93,25 +108,31 @@ public final class BeamioConetChatListenSession {
 		onInbound: @escaping InboundHandler
 	) {
 		while stillAlive(gen: gen) {
+			var reopenNow = false
 			do {
-				try runOneListen(session: session, gen: gen, onStatus: onStatus, onInbound: onInbound)
+				reopenNow = try runOneListen(session: session, gen: gen, onStatus: onStatus, onInbound: onInbound)
 			} catch {
 				if stillAlive(gen: gen) {
 					onStatus("reconnecting", error.localizedDescription)
 				}
 			}
 			if !stillAlive(gen: gen) { break }
-			onStatus("reconnecting", "retry")
-			Thread.sleep(forTimeInterval: TimeInterval(retryMs) / 1000.0)
+			onStatus("reconnecting", reopenNow ? "relisten" : "retry")
+			// A listen that worked and then dropped reopens at once with a new command.
+			Thread.sleep(forTimeInterval: reopenNow ? 0.5 : TimeInterval(retryMs) / 1000.0)
 		}
 	}
 
+	/// One signed `mailbox_listen` (one instanceId) tried on entries until one
+	/// works. Returns true when the mailbox answered on a stream that then
+	/// dropped: the caller builds a new command instead of reusing this one.
+	@discardableResult
 	private func runOneListen(
 		session: BeamioConetChatModule.Session,
 		gen: Int,
 		onStatus: @escaping StatusHandler,
 		onInbound: @escaping InboundHandler
-	) throws {
+	) throws -> Bool {
 		let ownRoute = session.ownRouteArmoredPublicKey
 		guard ownRoute.contains("BEGIN PGP PUBLIC KEY") else {
 			throw NSError(domain: "BeamioConetChatListen", code: -1, userInfo: [
@@ -145,7 +166,7 @@ public final class BeamioConetChatListenSession {
 
 		let sign = try awaitSign(cmdJson)
 		let innerArmor = try awaitEncryptSignedRoute(message: cmdJson, signature: sign, route: ownRoute)
-		guard stillAlive(gen: gen) else { return }
+		guard stillAlive(gen: gen) else { return false }
 
 		let entries = session.nodes.filter { n in
 			guard let ip = BeamioSiCipherPost.normalizeIp(n.ip) else { return false }
@@ -159,7 +180,7 @@ public final class BeamioConetChatListenSession {
 
 		var lastError: String?
 		for entry in entries {
-			guard stillAlive(gen: gen) else { return }
+			guard stillAlive(gen: gen) else { return false }
 			guard let entryIp = BeamioSiCipherPost.normalizeIp(entry.ip),
 			      !BeamioSiCipherPost.isMarkedUnreachable(entryIp),
 			      let url = BeamioSiCipherPost.postUrl(for: entryIp)
@@ -173,6 +194,7 @@ public final class BeamioConetChatListenSession {
 			}
 
 			NSLog("[BeamioConetChat] mailbox_listen entry=%@ domain=%@", entryIp, entry.domain)
+			let streamStarted = Date()
 			let err = openSse(
 				url: url,
 				armored: armored,
@@ -183,9 +205,13 @@ public final class BeamioConetChatListenSession {
 				onStatus: onStatus,
 				onInbound: onInbound
 			)
-			if err == nil { return }
+			if err == nil { return false }
 			lastError = err
-			if err == "root_stop" || !stillAlive(gen: gen) { return }
+			if err == "root_stop" || !stillAlive(gen: gen) { return false }
+			// The mailbox registered this listen under its instanceId. Reusing this
+			// command on another entry lets the old socket's late close remove the
+			// new session at the mailbox: build a new command instead.
+			if heardMailbox(since: streamStarted) { return true }
 		}
 		throw NSError(domain: "BeamioConetChatListen", code: -4, userInfo: [
 			NSLocalizedDescriptionKey: lastError ?? "all_entries_failed",
@@ -210,13 +236,21 @@ public final class BeamioConetChatListenSession {
 			url: url,
 			armor: armored,
 			connectTimeout: 12,
-			idleTimeout: 120,
+			// The mailbox's sealed keepalive comes every 60–180 s: wait longer than
+			// that before calling the stream dead (120 s cut healthy listens).
+			idleTimeout: 200,
 			onOpen: {
-				onStatus("listening", "handshake")
+				// HTTP 200 only means the entry took the request. "listening" is
+				// reported when the mailbox's sealed handshake frame arrives.
 				openSem.signal()
 			},
 			onEvent: { [weak self] payload in
 				guard let frame = Self.openStreamFrame(payload, key: streamKey) else { return }
+				if let self {
+					self.lock.lock()
+					self.lastSealedFrameAt = Date()
+					self.lock.unlock()
+				}
 				self?.handleSsePayload(
 					frame,
 					session: session,
@@ -298,12 +332,13 @@ public final class BeamioConetChatListenSession {
 		if let data = trimmed.data(using: .utf8),
 		   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
 			let type = obj["type"] as? String ?? ""
-			if type == "mailbox_keepalive" || obj["epoch"] != nil || obj["status"] != nil {
-				onStatus("listening", "heartbeat")
+			// The mailbox's first frame: `{status:200, kind:'mailbox', instanceId, nodeWallet, …}`.
+			if (obj["kind"] as? String) == "mailbox" || ((obj["ok"] as? Bool) == true && obj["nodeWallet"] != nil) {
+				onStatus("listening", "handshake")
 				return
 			}
-			if (obj["ok"] as? Bool) == true && (obj["kind"] != nil || obj["nodeWallet"] != nil) {
-				onStatus("listening", "handshake")
+			if type == "mailbox_keepalive" || obj["epoch"] != nil || obj["status"] != nil {
+				onStatus("listening", "heartbeat")
 				return
 			}
 		}
@@ -312,9 +347,31 @@ public final class BeamioConetChatListenSession {
 		      armored.contains("BEGIN PGP MESSAGE")
 		else { return }
 
-		Self.decryptArmor(session: session, armored: armored) { line, hash in
+		Self.decryptArmor(
+			session: session,
+			armored: armored,
+			onFailure: { [weak self] in self?.restartAfterDecryptFailure() }
+		) { line, hash in
 			onInbound(line, hash, viaDomain, armored)
 		}
+	}
+
+	private var lastDecryptRestart = Date.distantPast
+
+	/// A message on this stream could not be decrypted (the crypto host failed
+	/// even after rebuilding). It was not ACKed, so the mailbox still holds it and
+	/// sends it again to a new listen: reopen the stream (at most every 30 s).
+	private func restartAfterDecryptFailure() {
+		lock.lock()
+		let now = Date()
+		guard now.timeIntervalSince(lastDecryptRestart) > 30, let task = sseTask else {
+			lock.unlock()
+			return
+		}
+		lastDecryptRestart = now
+		lock.unlock()
+		NSLog("[BeamioConetChat] inbound decrypt failed; reopening the mailbox listen")
+		task.cancel()
 	}
 
 	/// Decrypt one inbound armor with the session PGP key into the chat line the
@@ -323,6 +380,7 @@ public final class BeamioConetChatListenSession {
 	static func decryptArmor(
 		session: BeamioConetChatModule.Session,
 		armored: String,
+		onFailure: (() -> Void)? = nil,
 		onLine: @escaping (_ line: String, _ armorHash: String) -> Void
 	) {
 		BeamioOpenPgpHost.shared.decryptInboundArmor(
@@ -332,6 +390,7 @@ public final class BeamioConetChatListenSession {
 			switch result {
 			case .failure:
 				NSLog("[BeamioConetChat] inbound decrypt failed")
+				onFailure?()
 			case .success(let dec):
 				var line = normalizeInboundPlaintext(dec.text)
 				if line.isEmpty { return }

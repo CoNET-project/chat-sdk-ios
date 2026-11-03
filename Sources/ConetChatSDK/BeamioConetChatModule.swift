@@ -938,10 +938,19 @@ public enum BeamioConetChatModule {
 		)
 	}
 
+	/// Back in the foreground with no word from the mailbox for this long: reopen
+	/// the listen. A stream that died while the app was suspended is not always
+	/// reported, and only a new listen makes the mailbox send what it holds.
+	private static let resumeStaleSeconds: TimeInterval = 45
+
 	private static func resumeListen() {
 		guard let s = currentSession() else { return }
-		// Already connected (or reconnecting by itself): do not restart it.
-		if listen.isListening() { return }
+		if listen.isListening() {
+			// Connected (or reconnecting by itself) and recently heard: keep it.
+			let quiet = listen.secondsSinceLastMailboxFrame()
+			if quiet < resumeStaleSeconds { return }
+			NSLog("[BeamioConetChat] resume: mailbox quiet %.0fs; reopening the listen", quiet)
+		}
 		listen.resume(
 			session: s,
 			onStatus: { status, detail in
