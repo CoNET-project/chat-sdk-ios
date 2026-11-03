@@ -109,3 +109,7 @@ Semantic versioning. Tag releases as `v0.1.0`, `v0.2.0`, …. Until the first re
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+
+## Developer knowledge base
+
+Lessons learned across the TypeScript, iOS and Android SDKs (symptom, root cause, rule, how to verify) are kept in one place, in the TypeScript SDK repository: [CoNET-project/chat-sdk docs/knowledge-base](https://github.com/CoNET-project/chat-sdk/tree/main/docs/knowledge-base). iOS specifics: [platform-ios.md](https://github.com/CoNET-project/chat-sdk/blob/main/docs/knowledge-base/platform-ios.md).
