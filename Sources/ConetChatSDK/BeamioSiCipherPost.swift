@@ -114,6 +114,15 @@ public enum BeamioSiCipherPost {
 			pool.append(BeamioChatPgpKeychain.SiNode(ip: ip, domain: node.domain, region: node.region))
 		}
 
+		// Warm pool first: an entry checked in the background returns at once (no probe here).
+		if !pool.isEmpty {
+			var byIp: [String: BeamioChatPgpKeychain.SiNode] = [:]
+			for node in pool { byIp[node.ip] = node }
+			if let ip = BeamioEntryPool.shared.pickIp(allowed: Set(byIp.keys), excluding: []), let node = byIp[ip] {
+				return node
+			}
+			BeamioEntryPool.shared.warmNow()
+		}
 		var probes = 0
 		while !pool.isEmpty && probes < 6 {
 			guard let picked = weightedPick(pool, scores: scores) else { return nil }

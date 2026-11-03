@@ -50,8 +50,19 @@ public final class BeamioEntryPool {
 	private var timer: DispatchSourceTimer?
 	private var tickRunning = false
 	private var tickAgain = false
+	/// Last ready set, saved after each refresh: a push wake uses it before the first probe ends.
+	private static let cacheKey = "conet.entryPool.cache.v1"
+	static let cacheMaxAge: TimeInterval = 30 * 60
+	private var cached: [String] = []
+	private var cachedAt = Date.distantPast
 
 	private init() {
+		if let saved = UserDefaults.standard.dictionary(forKey: Self.cacheKey),
+		   let at = saved["at"] as? Double, let ips = saved["ips"] as? [String]
+		{
+			cached = ips
+			cachedAt = Date(timeIntervalSince1970: at)
+		}
 		#if canImport(UIKit)
 		let center = NotificationCenter.default
 		center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: nil) { [weak self] _ in
@@ -155,9 +166,41 @@ public final class BeamioEntryPool {
 		return (ip, nil)
 	}
 
-	/// A send through `ip` failed: drop it until a later probe brings it back.
-	func reportFailure(ip: String) {
+	/// A warm IP inside `allowed`, outside `excluding`, for callers that open their own
+	/// connection (entry picks, SSE). Leaves the pre-opened connections for `take`.
+	/// Before the first refresh of this process (push wake) the saved set is used.
+	public func pickIp(allowed: Set<String>, excluding: Set<String>) -> String? {
 		lock.lock()
+		let now = Date()
+		var usable = ready.values.filter {
+			allowed.contains($0.ip) && !excluding.contains($0.ip)
+				&& now.timeIntervalSince($0.checkedAt) < Self.entryMaxAge * 2
+		}.map(\.ip)
+		if usable.isEmpty, now.timeIntervalSince(cachedAt) < Self.cacheMaxAge {
+			usable = cached.filter { allowed.contains($0) && !excluding.contains($0) }
+		}
+		let fresh = usable.filter { !recent.contains($0) }
+		let picked = (fresh.isEmpty ? usable : fresh).randomElement()
+		if let picked {
+			recent.append(picked)
+			if recent.count > Self.recentAvoid { recent.removeFirst(recent.count - Self.recentAvoid) }
+		}
+		lock.unlock()
+		return picked
+	}
+
+	/// IPs that answered a probe lately (e.g. to prefer a live voice relay).
+	public func warmIps() -> Set<String> {
+		lock.lock()
+		defer { lock.unlock() }
+		let now = Date()
+		return Set(ready.values.filter { now.timeIntervalSince($0.checkedAt) < Self.entryMaxAge * 2 }.map(\.ip))
+	}
+
+	/// A send through `ip` failed: drop it until a later probe brings it back.
+	public func reportFailure(ip: String) {
+		lock.lock()
+		cached.removeAll { $0 == ip }
 		ready.removeValue(forKey: ip)
 		let h = hot.removeValue(forKey: ip)
 		lock.unlock()
@@ -247,6 +290,12 @@ public final class BeamioEntryPool {
 		if ready.count > Self.targetReady {
 			let keep = ready.values.sorted { $0.latencyMs < $1.latencyMs }.prefix(Self.targetReady).map(\.ip)
 			ready = ready.filter { keep.contains($0.key) }
+		}
+		if !ready.isEmpty {
+			// IPs only (public node table entries): no wallet, no identity.
+			cached = Array(ready.keys)
+			cachedAt = Date()
+			UserDefaults.standard.set(["at": cachedAt.timeIntervalSince1970, "ips": cached], forKey: Self.cacheKey)
 		}
 		// Retire old or broken pre-opened connections.
 		var retired: [NWConnection] = []
