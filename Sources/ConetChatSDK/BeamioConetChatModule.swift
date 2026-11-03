@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 /// Native Conet Chat Module — WorkerCommand / WorkerOutbound parity; 1B signing via PWA.
 public enum BeamioConetChatModule {
@@ -127,8 +128,20 @@ public enum BeamioConetChatModule {
 		case "ackInbound":
 			handleAckInbound(body)
 		case "resume":
-			DispatchQueue.main.async { pauseOwed = false }
-			resumeListen()
+			DispatchQueue.main.async {
+				// The shell reported the app in the background: the page (or a
+				// wake event it got) does not reopen the listen there.
+				guard BeamioListenPolicy.pageResumeApplies(
+					lifecycleKnown: lifecycleKnown,
+					inForeground: appInForeground,
+					callInProgress: keepListenWhile?() == true
+				) else {
+					NSLog("[BeamioConetChat] page resume ignored: app in the background")
+					return
+				}
+				pauseOwed = false
+				resumeListen()
+			}
 		case "destroy":
 			destroy()
 		case "clearIdentity":
@@ -393,6 +406,12 @@ public enum BeamioConetChatModule {
 			postIdleCheck()
 			return
 		}
+		guard BeamioListenPolicy.pauseApplies(lifecycleKnown: lifecycleKnown, inForeground: appInForeground, callInProgress: false) else {
+			// The app is in the foreground: it keeps its listen.
+			NSLog("[BeamioConetChat] pause skipped: app in the foreground")
+			pauseOwed = false
+			return
+		}
 		pauseOwed = false
 		listen.pause()
 		emitEvent(["type": "event:status", "payload": ["status": "idle", "detail": "paused"]])
@@ -412,6 +431,67 @@ public enum BeamioConetChatModule {
 				requestPause()
 			}
 		}
+	}
+
+	// MARK: - App foreground / background (shell)
+
+	/// The shell reports the app state (`appWillEnterForeground` / `appDidEnterBackground`). Main queue.
+	private static var lifecycleKnown = false
+	private static var appInForeground = true
+
+	/// Shell: the app went to the background. The app does not run there: the
+	/// listen is paused after a short grace (a call push or dial may be
+	/// starting), or when the call that rings / is up ends. Nothing retries
+	/// while paused. Main queue.
+	public static func appDidEnterBackground(reason: String = "background") {
+		lifecycleKnown = true
+		guard appInForeground else { return }
+		appInForeground = false
+		guard currentSession() != nil else { return }
+		NSLog("[BeamioConetChat] app in the background (%@); listen pauses in %.0fs unless a call needs it", reason, idleCheckInterval)
+		pauseOwed = true
+		postIdleCheck()
+	}
+
+	/// Shell: the app came to the foreground. Reconnect now: resume a paused
+	/// listen, cut a retry wait short, or reopen a listen the mailbox has been
+	/// quiet on for 45 s (it may have died while the app was suspended). Main queue.
+	public static func appWillEnterForeground(reason: String = "foreground") {
+		lifecycleKnown = true
+		appInForeground = true
+		pauseOwed = false
+		guard currentSession() != nil else { return }
+		ensureNetworkWatch()
+		if !listen.isListening() {
+			NSLog("[BeamioConetChat] app in the foreground (%@); listen resumed", reason)
+			resumeListen()
+		} else if !listenConnected {
+			NSLog("[BeamioConetChat] app in the foreground (%@); retrying the listen now", reason)
+			listen.retryNow()
+		} else {
+			resumeListen()
+		}
+	}
+
+	private static var networkMonitor: NWPathMonitor?
+
+	/// Retry at once when a network comes up, instead of waiting out the
+	/// backoff. Has an effect only while the listen runs and is not connected
+	/// (never while paused in the background).
+	private static func ensureNetworkWatch() {
+		guard networkMonitor == nil else { return }
+		let monitor = NWPathMonitor()
+		monitor.pathUpdateHandler = { path in
+			DispatchQueue.main.async {
+				guard path.status == .satisfied else { return }
+				if listen.isListening(), !listenConnected {
+					NSLog("[BeamioConetChat] network available; retrying the listen now")
+					listen.retryNow()
+				}
+			}
+		}
+		monitor.start(queue: DispatchQueue.global(qos: .utility))
+		networkMonitor = monitor
 	}
 
 	/// Logout / wallet removed or switched: stop and forget the stored keys.
@@ -924,6 +1004,15 @@ public enum BeamioConetChatModule {
 	// MARK: - Listen lifecycle
 
 	private static func startListen(session: Session) {
+		DispatchQueue.main.async {
+			ensureNetworkWatch()
+			// Started while the app is in the background (page reload, call
+			// push): it pauses again unless a call needs it.
+			if lifecycleKnown, !appInForeground {
+				pauseOwed = true
+				postIdleCheck()
+			}
+		}
 		listen.start(
 			session: session,
 			onStatus: { status, detail in

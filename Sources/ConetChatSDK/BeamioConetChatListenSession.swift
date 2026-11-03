@@ -15,7 +15,6 @@ public final class BeamioConetChatListenSession {
 	private var running = false
 	private var paused = false
 	private var sseTask: BeamioSiCipherPost.SseHandle?
-	private let retryMs: UInt64 = 6_000
 	/// Last frame from the mailbox that opened with this listen's stream key.
 	private var lastSealedFrameAt = Date.distantPast
 
@@ -49,6 +48,8 @@ public final class BeamioConetChatListenSession {
 		paused = true
 		lock.unlock()
 		stopCurrentSse()
+		// A loop waiting to retry ends now instead of after its backoff.
+		retryNow()
 	}
 
 	func resume(
@@ -86,6 +87,7 @@ public final class BeamioConetChatListenSession {
 		generation += 1
 		lock.unlock()
 		stopCurrentSse()
+		retryNow()
 	}
 
 	private func stopCurrentSse() {
@@ -107,8 +109,10 @@ public final class BeamioConetChatListenSession {
 		onStatus: @escaping StatusHandler,
 		onInbound: @escaping InboundHandler
 	) {
+		var failures = 0
 		while stillAlive(gen: gen) {
 			var reopenNow = false
+			let tryStarted = Date()
 			do {
 				reopenNow = try runOneListen(session: session, gen: gen, onStatus: onStatus, onInbound: onInbound)
 			} catch {
@@ -117,10 +121,36 @@ public final class BeamioConetChatListenSession {
 				}
 			}
 			if !stillAlive(gen: gen) { break }
+			// The mailbox answered on this try: the network works, start the backoff over.
+			if reopenNow || heardMailbox(since: tryStarted) { failures = 0 } else { failures += 1 }
 			onStatus("reconnecting", reopenNow ? "relisten" : "retry")
-			// A listen that worked and then dropped reopens at once with a new command.
-			Thread.sleep(forTimeInterval: reopenNow ? 0.5 : TimeInterval(retryMs) / 1000.0)
+			// A listen that worked and then dropped reopens at once (new command).
+			// Otherwise back off (2 s … 30 s); the network coming back or the app
+			// coming to the foreground cuts the wait short (`retryNow`).
+			let wait = reopenNow
+				? BeamioListenPolicy.relisten
+				: BeamioListenPolicy.retryDelay(failures: failures, jitter: Double.random(in: 0..<1))
+			if !reopenNow { NSLog("[BeamioConetChat] listen retry in %lds (failures=%ld)", Int(wait), failures) }
+			waitBeforeRetry(wait)
 		}
+	}
+
+	private let retrySignal = NSCondition()
+	private var retryKicked = false
+
+	/// Cut a retry wait short (network back, app in the foreground, paused).
+	func retryNow() {
+		retrySignal.lock()
+		retryKicked = true
+		retrySignal.broadcast()
+		retrySignal.unlock()
+	}
+
+	private func waitBeforeRetry(_ seconds: TimeInterval) {
+		retrySignal.lock()
+		if !retryKicked { _ = retrySignal.wait(until: Date().addingTimeInterval(seconds)) }
+		retryKicked = false
+		retrySignal.unlock()
 	}
 
 	/// One signed `mailbox_listen` (one instanceId) tried on entries until one
