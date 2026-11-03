@@ -539,6 +539,12 @@ public enum BeamioConetChatModule {
 			ack(reqId, ok: false, error: "missing_recipient_pgp")
 			return
 		}
+		// Every send is wrapped to the recipient's mailbox route key, so the entry
+		// never sees the recipient key ID. Without that route: not sent.
+		guard mailboxRoute.contains("BEGIN PGP PUBLIC KEY") else {
+			ack(reqId, ok: false, error: "recipient_mailbox_unknown")
+			return
+		}
 		let host = BeamioOpenPgpHost.shared
 		BeamioConetChatSignBroker.requestEip191(message: payload) { signResult in
 			switch signResult {
@@ -564,25 +570,17 @@ public enum BeamioConetChatModule {
 								}
 							}
 						}
-						if noPush {
-							guard mailboxRoute.contains("BEGIN PGP PUBLIC KEY") else {
-								ack(reqId, ok: false, error: "NoPush requires recipient mailbox routerArmoredPublicKey")
-								return
+						host.wrapArmorToMailboxWork(
+							innerArmor: armor,
+							mailboxRoutePublicArmor: mailboxRoute,
+							noPush: noPush
+						) { wrapResult in
+							switch wrapResult {
+							case .failure(let err):
+								ack(reqId, ok: false, error: err.localizedDescription)
+							case .success(let wrapped):
+								postInner(wrapped)
 							}
-							host.wrapArmorToMailboxWork(
-								innerArmor: armor,
-								mailboxRoutePublicArmor: mailboxRoute,
-								noPush: true
-							) { wrapResult in
-								switch wrapResult {
-								case .failure(let err):
-									ack(reqId, ok: false, error: err.localizedDescription)
-								case .success(let wrapped):
-									postInner(wrapped)
-								}
-							}
-						} else {
-							postInner(armor)
 						}
 					}
 				}
@@ -624,16 +622,20 @@ public enum BeamioConetChatModule {
 					let pgp = String(member["userPublicKeyArmored"] as? String
 						?? member["pgpPublicKeyArmored"] as? String ?? "")
 					let route = String(member["routerArmoredPublicKey"] as? String ?? "")
-					guard pgp.contains("BEGIN PGP PUBLIC KEY") else { continue }
+					// Wrapped to the member's mailbox: no route, no delivery.
+					guard pgp.contains("BEGIN PGP PUBLIC KEY"), route.contains("BEGIN PGP PUBLIC KEY") else { continue }
 					group.enter()
 					host.encryptUtf8JsonBase64(jsonObject: envelope, recipientPublicArmor: pgp) { enc in
+						guard case .success(let userArmor) = enc else { group.leave(); return }
+						host.wrapArmorToMailboxWork(innerArmor: userArmor, mailboxRoutePublicArmor: route, noPush: false) { wrap in
 						defer { group.leave() }
-						guard case .success(let armor) = enc else { return }
+						guard case .success(let armor) = wrap else { return }
 						let ok = postToEntriesSync(armor: armor, mailboxRoute: route, session: s)
 						if ok {
 							deliverLock.lock()
 							delivered += 1
 							deliverLock.unlock()
+						}
 						}
 					}
 				}
@@ -1177,7 +1179,13 @@ public enum BeamioConetChatModule {
 			return !exclude.contains(ip)
 		}.shuffled()
 
+		// One entry at a time; the next only after a clear failure (connection
+		// error or reset, non-2xx, `ok:false`, or no answer in 8 s). A timed-out
+		// POST may have arrived: the mailbox keeps one copy per ciphertext and
+		// the recipient dedupes by sendId. At most 4 entries, about 25 s.
+		let started = Date()
 		for entry in entryCandidates.prefix(4) {
+			if Date().timeIntervalSince(started) > 25 { break }
 			var postArmor = armor
 			if entry.armoredPublicKey.contains("BEGIN PGP PUBLIC KEY") {
 				let sem = DispatchSemaphore(value: 0)
@@ -1191,19 +1199,16 @@ public enum BeamioConetChatModule {
 				armor: postArmor,
 				nodes: [entry.asKeychainNode()],
 				excludeIps: exclude,
-				maxAttempts: 1
+				maxAttempts: 1,
+				timeout: 8
 			)
 			if result.ok { return true }
 		}
+		if !entryCandidates.isEmpty { return false }
 
-		// Fallback: any roster node excluding mailbox.
-		let roster = session.nodes.map { $0.asKeychainNode() }
-		if roster.isEmpty, let kc = BeamioChatPgpKeychain.load() {
-			let result = BeamioSiCipherPost.post(armor: armor, nodes: kc.siNodes, excludeIps: exclude)
-			return result.ok
-		}
-		let result = BeamioSiCipherPost.post(armor: armor, nodes: roster, excludeIps: exclude)
-		return result.ok
+		// No node list in the session yet: the keychain roster (same one-at-a-time post).
+		let roster = BeamioChatPgpKeychain.load()?.siNodes ?? []
+		return BeamioSiCipherPost.post(armor: armor, nodes: roster, excludeIps: exclude, maxAttempts: 4, timeout: 8).ok
 	}
 
 	private static func currentSession() -> Session? {

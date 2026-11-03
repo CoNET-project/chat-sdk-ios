@@ -37,6 +37,7 @@ let package = Package(
 			path: "Tests/ConetChatSDKTests",
 			resources: [
 				.copy("Resources/chat-daemon-vectors.v1.json"),
+				.copy("Resources/mailbox-stream-vectors.v1.json"),
 				.copy("Resources/eth-sign-vectors.json"),
 			]
 		),

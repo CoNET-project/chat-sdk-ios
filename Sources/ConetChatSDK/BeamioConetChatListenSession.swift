@@ -1,4 +1,6 @@
+import CryptoKit
 import Foundation
+import Security
 
 /// Mailbox SSE listen: encrypt `mailbox_listen` to B route PGP, HTTP via entry C ≠ B.
 public final class BeamioConetChatListenSession {
@@ -118,10 +120,20 @@ public final class BeamioConetChatListenSession {
 		}
 		let mailboxIps = Self.mailboxIps(session: session)
 
+		// Fresh stream key per listen: B seals every SSE frame with it, so the
+		// entry relaying the stream cannot read the recipient key ID. Memory only.
+		var keyBytes = [UInt8](repeating: 0, count: 32)
+		guard SecRandomCopyBytes(kSecRandomDefault, keyBytes.count, &keyBytes) == errSecSuccess else {
+			throw NSError(domain: "BeamioConetChatListen", code: -5, userInfo: [
+				NSLocalizedDescriptionKey: "stream_key",
+			])
+		}
+		let streamKey = SymmetricKey(data: Data(keyBytes))
 		let command: [String: Any] = [
 			"command": "mailbox_listen",
 			"walletAddress": session.eoa,
 			"instanceId": UUID().uuidString,
+			"streamKey": Data(keyBytes).base64EncodedString(),
 		]
 		guard let cmdData = try? JSONSerialization.data(withJSONObject: command),
 		      let cmdJson = String(data: cmdData, encoding: .utf8)
@@ -164,6 +176,7 @@ public final class BeamioConetChatListenSession {
 			let err = openSse(
 				url: url,
 				armored: armored,
+				streamKey: streamKey,
 				session: session,
 				gen: gen,
 				viaDomain: entry.domain,
@@ -182,6 +195,7 @@ public final class BeamioConetChatListenSession {
 	private func openSse(
 		url: URL,
 		armored: String,
+		streamKey: SymmetricKey,
 		session: BeamioConetChatModule.Session,
 		gen: Int,
 		viaDomain: String,
@@ -202,8 +216,9 @@ public final class BeamioConetChatListenSession {
 				openSem.signal()
 			},
 			onEvent: { [weak self] payload in
+				guard let frame = Self.openStreamFrame(payload, key: streamKey) else { return }
 				self?.handleSsePayload(
-					payload,
+					frame,
 					session: session,
 					viaDomain: viaDomain,
 					onStatus: onStatus,
@@ -234,6 +249,30 @@ public final class BeamioConetChatListenSession {
 		lock.unlock()
 		if !stillAlive(gen: gen) { return "root_stop" }
 		return closeReason ?? "server_closed"
+	}
+
+	/// Open one mailbox SSE frame with this listen's stream key:
+	/// `base64(iv[12] ‖ AES-256-GCM ciphertext ‖ tag[16])`, plaintext JSON padded
+	/// with spaces. Every mailbox seals every frame; anything else (plain JSON,
+	/// a frame that does not open) is dropped. Never logs the key or contents.
+	static func openStreamFrame(_ payload: String, key: SymmetricKey) -> String? {
+		let trimmed = payload.trimmingCharacters(in: .whitespacesAndNewlines)
+		if trimmed.isEmpty { return nil }
+		guard trimmed.count >= 40,
+		      trimmed.range(of: "^[A-Za-z0-9+/]+={0,2}$", options: .regularExpression) != nil,
+		      let blob = Data(base64Encoded: trimmed)
+		else {
+			NSLog("[BeamioConetChat] mailbox frame not sealed; dropped len=%ld", trimmed.count)
+			return nil
+		}
+		guard let box = try? AES.GCM.SealedBox(combined: blob),
+		      let plain = try? AES.GCM.open(box, using: key),
+		      let text = String(data: plain, encoding: .utf8)
+		else {
+			NSLog("[BeamioConetChat] mailbox frame did not open len=%ld", trimmed.count)
+			return nil
+		}
+		return text.trimmingCharacters(in: .whitespacesAndNewlines)
 	}
 
 	private func handleSsePayload(

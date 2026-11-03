@@ -23,6 +23,7 @@ public enum BeamioConetChatProtocol {
 		"voice.delegated",
 		"presence.query",
 		"mailbox.command",
+		"send.mailboxWrap",
 	]
 
 	/// `hello` answer (`ack.result`).
