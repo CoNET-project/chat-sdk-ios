@@ -30,6 +30,8 @@ public enum BeamioConetChatModule {
 		public var pgpPublicKeyArmored: String = ""
 		public var ownRouteArmoredPublicKey: String = ""
 		public var mailboxIp: String = ""
+		/// Route key ID the running listen sent its last `mailbox_listen` to (log + handoff check).
+		public var listenRouteKeyId: String = ""
 		public var nodes: [Node] = []
 		public var routes: [[String: Any]] = []
 		public var conetRpcUrl: String = "https://rpc1.conet.network"
@@ -309,6 +311,7 @@ public enum BeamioConetChatModule {
 				} else {
 					resumeListen()
 				}
+				checkOwnRoute(session: s, reason: "page attach")
 				for (hash, p) in pending {
 					emitEvent([
 						"type": "event:message",
@@ -488,6 +491,7 @@ public enum BeamioConetChatModule {
 					NSLog("[BeamioConetChat] network available; retrying the listen now")
 					listen.retryNow()
 				}
+				kickOwnRouteCheck()
 			}
 		}
 		monitor.start(queue: DispatchQueue.global(qos: .utility))
@@ -1013,6 +1017,105 @@ public enum BeamioConetChatModule {
 				postIdleCheck()
 			}
 		}
+		listen.start(
+			session: session,
+			onStatus: { status, detail in
+				listenConnected = status == "listening"
+				var payload: [String: Any] = ["status": status]
+				if let detail { payload["detail"] = detail }
+				emitEvent(["type": "event:status", "payload": payload])
+			},
+			onInbound: { plaintext, armorHash, viaDomain, armor in
+				handleInbound(plaintext: plaintext, armorHash: armorHash, viaDomain: viaDomain, armor: armor)
+			}
+		)
+		checkOwnRoute(session: session, reason: "listen start")
+	}
+
+	// MARK: - Own route vs chain (see BeamioOwnRouteCheck)
+
+	private static let routeCheckSignal = NSCondition()
+	private static var routeCheckGen = 0
+
+	/// Network back: a check waiting to retry reads the chain now.
+	private static func kickOwnRouteCheck() {
+		routeCheckSignal.lock()
+		routeCheckSignal.broadcast()
+		routeCheckSignal.unlock()
+	}
+
+	/// Check the session's route against the chain record. A failed read retries
+	/// with backoff and never changes the route; a different chain route wins and
+	/// the listen reopens on it. One check runs at a time; a newer one ends it.
+	private static func checkOwnRoute(session s: Session, reason: String) {
+		routeCheckSignal.lock()
+		routeCheckGen += 1
+		let gen = routeCheckGen
+		routeCheckSignal.broadcast()
+		routeCheckSignal.unlock()
+		DispatchQueue.global(qos: .utility).async {
+			let alive: () -> Bool = {
+				routeCheckSignal.lock()
+				let current = routeCheckGen == gen
+				routeCheckSignal.unlock()
+				return current && currentSession() === s && !s.destroyed
+			}
+			// Page handoff: a running listen on another route than the session's reopens now.
+			let inUse = s.listenRouteKeyId
+			let wanted = BeamioOwnRouteCheck.routeKeyId(s.ownRouteArmoredPublicKey)
+			if !inUse.isEmpty, !wanted.isEmpty, inUse != wanted {
+				NSLog("[BeamioConetChat] own route: listen on %@, session route %@ (%@); reopening", inUse, wanted, reason)
+				DispatchQueue.main.async { if alive(), listen.isListening() { reopenListen(session: s) } }
+			}
+			let verdict = BeamioOwnRouteCheck.reconcile(
+				listenArmor: { s.ownRouteArmoredPublicKey },
+				read: { BeamioOwnRouteCheck.readChainRoute(rpcUrl: s.conetRpcUrl, eoa: s.eoa) },
+				sleep: { seconds in
+					routeCheckSignal.lock()
+					_ = routeCheckSignal.wait(until: Date().addingTimeInterval(seconds))
+					routeCheckSignal.unlock()
+					return alive()
+				},
+				onRetry: { why, seconds in
+					NSLog("[BeamioConetChat] own route check: chain read failed (%@); keeping route=%@; retry in %.0fs", why, wanted, seconds)
+				}
+			)
+			guard alive() else { return }
+			switch verdict {
+			case .match:
+				NSLog("[BeamioConetChat] own route check: route=%@ matches chain (%@)", wanted, reason)
+			case .noRoute:
+				NSLog("[BeamioConetChat] own route check: chain has no route; keeping route=%@", wanted)
+			case .switchTo(let chainId, let chainArmor):
+				NSLog("[BeamioConetChat] own route mismatch: route=%@ chain=%@ (%@); reconnecting on the chain route", wanted, chainId, reason)
+				DispatchQueue.main.async {
+					if alive() { applyChainRoute(session: s, routeKeyId: chainId, routeArmor: chainArmor) }
+				}
+			case .retry:
+				break
+			}
+		}
+	}
+
+	/// Main thread. The chain route replaces the session's and the stored one.
+	private static func applyChainRoute(session s: Session, routeKeyId: String, routeArmor: String) {
+		s.ownRouteArmoredPublicKey = routeArmor
+		let mailboxIp = s.nodes.first { $0.domain.caseInsensitiveCompare(routeKeyId) == .orderedSame }?.ip ?? ""
+		s.mailboxIp = mailboxIp
+		BeamioChatPgpKeychain.upsert(fromWeb: [
+			"privateKeyArmor": s.pgpPrivateKeyArmored,
+			"routePublicKeyArmor": routeArmor,
+		])
+		let roster = BeamioChatPgpKeychain.loadSiNodes()
+		if !mailboxIp.isEmpty, !roster.isEmpty {
+			_ = BeamioChatPgpKeychain.storeChainRoster(nodes: roster, mailboxIp: mailboxIp)
+		}
+		emitEvent(["type": "event:log", "level": "warn", "message": "own route switched to the chain route \(routeKeyId)"])
+		// A paused listen picks the new route up when it resumes.
+		if listen.isListening() { reopenListen(session: s) }
+	}
+
+	private static func reopenListen(session: Session) {
 		listen.start(
 			session: session,
 			onStatus: { status, detail in

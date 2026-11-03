@@ -169,6 +169,8 @@ public final class BeamioConetChatListenSession {
 				NSLocalizedDescriptionKey: "missing_own_route",
 			])
 		}
+		let routeKeyId = BeamioOwnRouteCheck.routeKeyId(ownRoute)
+		session.listenRouteKeyId = routeKeyId
 		let mailboxIps = Self.mailboxIps(session: session)
 
 		// Fresh stream key per listen: B seals every SSE frame with it, so the
@@ -223,7 +225,7 @@ public final class BeamioConetChatListenSession {
 				armored = innerArmor
 			}
 
-			NSLog("[BeamioConetChat] mailbox_listen entry=%@ domain=%@", entryIp, entry.domain)
+			NSLog("[BeamioConetChat] mailbox_listen entry=%@ domain=%@ route=%@", entryIp, entry.domain, routeKeyId.isEmpty ? "?" : routeKeyId)
 			let streamStarted = Date()
 			let err = openSse(
 				url: url,
