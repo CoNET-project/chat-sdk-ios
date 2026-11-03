@@ -83,6 +83,9 @@ public enum BeamioConetChatModule {
 		BeamioConetChatSignBroker.setWebEmit(emit)
 		let type = String(body["type"] as? String ?? "")
 		switch type {
+		case "hello":
+			// Protocol v1: version + capabilities (see BeamioConetChatProtocol).
+			ack(body["reqId"] as? Int ?? 0, ok: true, result: BeamioConetChatProtocol.helloResult())
 		case "init":
 			handleInit(body)
 		case "setRoutes":
@@ -134,6 +137,10 @@ public enum BeamioConetChatModule {
 			provisionIdentity(body)
 		default:
 			NSLog("[BeamioConetChat] unknown command %@", type)
+			// Protocol v1: a command that expects an answer gets one.
+			if let reqId = body["reqId"] as? Int, reqId > 0 {
+				ack(reqId, ok: false, error: "unknown_command")
+			}
 		}
 	}
 

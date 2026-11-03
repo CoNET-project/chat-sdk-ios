@@ -20,5 +20,15 @@ let package = Package(
 				.process("Resources"),
 			]
 		),
+		// ChatDaemon protocol v1 conformance against the shared vectors (run on an iOS simulator:
+		// the crypto runs in WKWebView). See scripts/sync-protocol-vectors.sh.
+		.testTarget(
+			name: "ConetChatSDKTests",
+			dependencies: ["ConetChatSDK"],
+			path: "Tests/ConetChatSDKTests",
+			resources: [
+				.copy("Resources/chat-daemon-vectors.v1.json"),
+			]
+		),
 	]
 )
