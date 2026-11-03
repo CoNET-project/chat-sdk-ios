@@ -151,14 +151,20 @@ public enum BeamioSiCipherPost {
 
 	// MARK: - One-shot POST
 
-	/// Pick reachable, high-score roster IPs (mailbox B and caller excludes dropped)
-	/// and POST until one 2xx. Each attempt is `http://{ip}/post`.
+	/// POST until one 2xx. Each attempt is `http://{ip}/post`.
+	///
+	/// Entries come from the warm pool (`BeamioEntryPool`): checked recently, random,
+	/// different from the last few sends, often with a TCP connection already open.
+	/// Only when the pool has nothing usable does an attempt probe a roster node first.
+	/// `hedgeAfter`: a second entry starts when the first has not answered in that
+	/// time; the first 2xx wins (for call control, where a duplicate is harmless).
 	public static func post(
 		armor: String,
 		nodes: [BeamioChatPgpKeychain.SiNode],
 		excludeIps: Set<String>,
 		maxAttempts: Int = 4,
-		timeout: TimeInterval = 12
+		timeout: TimeInterval = 12,
+		hedgeAfter: TimeInterval? = nil
 	) -> Result {
 		let trimmed = armor.trimmingCharacters(in: .whitespacesAndNewlines)
 		guard trimmed.contains("BEGIN PGP MESSAGE") else {
@@ -175,54 +181,179 @@ public enum BeamioSiCipherPost {
 		guard !roster.isEmpty else {
 			return Result(ok: false, status: 0, body: "", error: "no_si_roster")
 		}
+		let rosterIps = Set(roster.map(\.ip))
+		// A single named entry (e.g. armor wrapped to that entry's key) is never swapped.
+		let usePool = rosterIps.count > 1
 
-		var skip = excludeIps
-		var lastStatus = 0
-		var lastErr = ""
-		let attempts = max(1, maxAttempts)
+		final class State {
+			let lock = NSLock()
+			var skip: Set<String>
+			var winner: Result?
+			var lastStatus = 0
+			var lastErr = ""
+			var lanesRunning = 0
+			let done = DispatchSemaphore(value: 0)
+			init(skip: Set<String>) { self.skip = skip }
+			var decided: Bool { lock.lock(); defer { lock.unlock() }; return winner != nil }
+		}
+		let state = State(skip: blocked)
 		let started = Date()
-		for _ in 0 ..< attempts {
-			// The PWA bridge waits 15 s for this call. Stay inside that budget.
-			let remaining = totalBudgetSeconds - Date().timeIntervalSince(started)
-			if remaining < 2.5 { break }
-			guard let node = getRandomNode(nodes: roster, excludeIps: skip, probeTimeout: min(2, remaining / 3)) else {
-				NSLog("[BeamioSiPost] no reachable entry left")
-				return Result(ok: false, status: lastStatus, body: "", error: lastErr.isEmpty ? "post_failed" : lastErr)
+		let attempts = max(1, maxAttempts)
+
+		func lane(_ id: Int) {
+			defer {
+				state.lock.lock()
+				state.lanesRunning -= 1
+				state.lock.unlock()
+				state.done.signal()
 			}
-			skip.insert(node.ip)
-			let left = totalBudgetSeconds - Date().timeIntervalSince(started)
-			if left < 1.5 { break }
-			let posted = httpRequest(
-				ip: node.ip,
-				method: "POST",
-				path: "/post",
-				body: body,
-				timeout: min(timeout, left - 0.5),
-				stopAfterStatusLine: false
-			)
-			lastStatus = posted.status
-			if !posted.error.isEmpty { lastErr = posted.error }
-			if (200 ..< 300).contains(posted.status) {
-				let capped = posted.body.count > 48_000 ? String(posted.body.prefix(48_000)) : posted.body
-				scoreEntry(ip: node.ip, reachable: true, latencyMs: posted.ms)
-				// SI may return HTTP 200 with `{ "ok": false, "error": "…" }`
-				// (e.g. voice_uplink target_voice_session_not_found). Trust body.
-				if !bodyOk(capped) {
-					NSLog("[BeamioSiPost] http 2xx but body ok=false ip=%@ status=%d", node.ip, posted.status)
-					continue
+			for _ in 0 ..< attempts {
+				if state.decided { return }
+				// The PWA bridge waits 15 s for this call. Stay inside that budget.
+				let remaining = totalBudgetSeconds - Date().timeIntervalSince(started)
+				if remaining < 2.5 { return }
+				state.lock.lock()
+				let skipNow = state.skip
+				state.lock.unlock()
+				var ip: String?
+				var conn: NWConnection?
+				var warm = false
+				if usePool, let pick = BeamioEntryPool.shared.take(allowed: rosterIps, excluding: skipNow) {
+					ip = pick.ip
+					conn = pick.conn
+					warm = true
+				} else if let node = getRandomNode(nodes: roster, excludeIps: skipNow, probeTimeout: min(2, remaining / 3)) {
+					ip = node.ip
 				}
-				NSLog("[BeamioSiPost] http ip=%@ ok status=%d ms=%d", node.ip, posted.status, posted.ms)
-				return Result(ok: true, status: posted.status, body: capped, error: "")
-			}
-			NSLog("[BeamioSiPost] http ip=%@ post status=%d err=%@ ms=%d", node.ip, posted.status, posted.error, posted.ms)
-			if posted.status == 0 {
-				scoreEntry(ip: node.ip, reachable: false, latencyMs: posted.ms)
-			} else {
-				scoreEntry(ip: node.ip, reachable: true, latencyMs: 500)
+				guard let ip else {
+					NSLog("[BeamioSiPost] no reachable entry left")
+					return
+				}
+				state.lock.lock()
+				state.skip.insert(ip)
+				state.lock.unlock()
+				let left = totalBudgetSeconds - Date().timeIntervalSince(started)
+				if left < 1.5 { conn?.cancel(); return }
+				let posted = httpRequest(
+					ip: ip,
+					method: "POST",
+					path: "/post",
+					body: body,
+					timeout: min(timeout, left - 0.5),
+					stopAfterStatusLine: false,
+					preopened: conn
+				)
+				state.lock.lock()
+				state.lastStatus = posted.status
+				if !posted.error.isEmpty { state.lastErr = posted.error }
+				state.lock.unlock()
+				if (200 ..< 300).contains(posted.status) {
+					let capped = posted.body.count > 48_000 ? String(posted.body.prefix(48_000)) : posted.body
+					scoreEntry(ip: ip, reachable: true, latencyMs: posted.ms)
+					// SI may return HTTP 200 with `{ "ok": false, "error": "…" }`
+					// (e.g. voice_uplink target_voice_session_not_found). Trust body.
+					if !bodyOk(capped) {
+						NSLog("[BeamioSiPost] http 2xx but body ok=false ip=%@ status=%d", ip, posted.status)
+						continue
+					}
+					NSLog(
+						"[BeamioSiPost] http ip=%@ ok status=%d ms=%d warm=%@ open=%@ lane=%d",
+						ip, posted.status, posted.ms, warm ? "yes" : "no", conn != nil ? "yes" : "no", id
+					)
+					state.lock.lock()
+					if state.winner == nil {
+						state.winner = Result(ok: true, status: posted.status, body: capped, error: "")
+					}
+					state.lock.unlock()
+					return
+				}
+				NSLog("[BeamioSiPost] http ip=%@ post status=%d err=%@ ms=%d warm=%@", ip, posted.status, posted.error, posted.ms, warm ? "yes" : "no")
+				BeamioEntryPool.shared.reportFailure(ip: ip)
+				if posted.status == 0 {
+					scoreEntry(ip: ip, reachable: false, latencyMs: posted.ms)
+				} else {
+					scoreEntry(ip: ip, reachable: true, latencyMs: 500)
+				}
 			}
 		}
+
+		state.lanesRunning = 1
+		if let hedgeAfter, rosterIps.count > 1 {
+			state.lanesRunning = 2
+			DispatchQueue.global(qos: .userInitiated).async {
+				Thread.sleep(forTimeInterval: hedgeAfter)
+				if state.decided {
+					state.lock.lock()
+					state.lanesRunning -= 1
+					state.lock.unlock()
+					state.done.signal()
+					return
+				}
+				lane(1)
+			}
+		}
+		lane(0)
+		// Wait for the other lane only while nothing has succeeded.
+		while true {
+			state.lock.lock()
+			let won = state.winner
+			let running = state.lanesRunning
+			state.lock.unlock()
+			if won != nil || running <= 0 { break }
+			let left = totalBudgetSeconds - Date().timeIntervalSince(started)
+			if left <= 0 { break }
+			_ = state.done.wait(timeout: .now() + left)
+		}
+		state.lock.lock()
+		let winner = state.winner
+		let lastStatus = state.lastStatus
+		let lastErr = state.lastErr
+		state.lock.unlock()
+		if let winner { return winner }
 		NSLog("[BeamioSiPost] http ip failed status=%d tried=%d lastErr=%@", lastStatus, attempts, lastErr.isEmpty ? "-" : lastErr)
 		return Result(ok: false, status: lastStatus, body: "", error: lastErr.isEmpty ? "post_failed" : lastErr)
+	}
+
+	/// Open a TCP connection to `ip:80` and wait until it is ready. The warm pool
+	/// keeps one or two of these so a send skips the handshake. Nil on failure.
+	public static func openConnection(ip rawIp: String, timeout: TimeInterval) -> NWConnection? {
+		guard let ip = normalizeIp(rawIp), let port = NWEndpoint.Port(rawValue: 80) else { return nil }
+		let params = NWParameters.tcp
+		if let tcp = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+			tcp.connectionTimeout = max(1, Int(timeout.rounded(.up)))
+			tcp.noDelay = true
+		}
+		let conn = NWConnection(host: NWEndpoint.Host(ip), port: port, using: params)
+		let sem = DispatchSemaphore(value: 0)
+		let flag = NSLock()
+		var ok = false
+		var signalled = false
+		conn.stateUpdateHandler = { state in
+			flag.lock()
+			defer { flag.unlock() }
+			guard !signalled else { return }
+			switch state {
+			case .ready:
+				ok = true
+				signalled = true
+				sem.signal()
+			case .failed, .waiting, .cancelled:
+				signalled = true
+				sem.signal()
+			default:
+				break
+			}
+		}
+		conn.start(queue: DispatchQueue(label: "beamio.sipost.preopen"))
+		_ = sem.wait(timeout: .now() + timeout)
+		flag.lock()
+		let ready = ok
+		flag.unlock()
+		if !ready {
+			conn.cancel()
+			return nil
+		}
+		return conn
 	}
 
 	/// Prefer JSON `ok` / `success` when present; empty or non-JSON 2xx → true.
@@ -257,7 +388,8 @@ public enum BeamioSiCipherPost {
 		path: String,
 		body: Data?,
 		timeout: TimeInterval,
-		stopAfterStatusLine: Bool
+		stopAfterStatusLine: Bool,
+		preopened: NWConnection? = nil
 	) -> RawResponse {
 		let started = Date()
 		func elapsed() -> Int { Int(Date().timeIntervalSince(started) * 1000) }
@@ -279,7 +411,9 @@ public enum BeamioSiCipherPost {
 			tcp.connectionTimeout = max(1, Int(timeout.rounded(.up)))
 			tcp.noDelay = true
 		}
-		let conn = NWConnection(host: NWEndpoint.Host(ip), port: port, using: params)
+		let reuse = preopened.flatMap { $0.state == .ready ? $0 : nil }
+		if reuse == nil { preopened?.cancel() }
+		let conn = reuse ?? NWConnection(host: NWEndpoint.Host(ip), port: port, using: params)
 		let queue = DispatchQueue(label: "beamio.sipost.http")
 		let sem = DispatchSemaphore(value: 0)
 		let box = RawBox()
@@ -340,16 +474,20 @@ public enum BeamioSiCipherPost {
 			}
 		}
 
+		func sendRequest() {
+			conn.send(content: requestData, completion: .contentProcessed { error in
+				if let error {
+					finish(status: 0, error: "send:\(error)")
+					return
+				}
+				receiveLoop()
+			})
+		}
+
 		conn.stateUpdateHandler = { state in
 			switch state {
 			case .ready:
-				conn.send(content: requestData, completion: .contentProcessed { error in
-					if let error {
-						finish(status: 0, error: "send:\(error)")
-						return
-					}
-					receiveLoop()
-				})
+				if reuse == nil { sendRequest() }
 			case .failed(let error):
 				finish(status: 0, error: "failed:\(error)")
 			case .waiting(let error):
@@ -359,7 +497,12 @@ public enum BeamioSiCipherPost {
 				break
 			}
 		}
-		conn.start(queue: queue)
+		if reuse != nil {
+			// Already connected by the warm pool: send now (its queue keeps running).
+			sendRequest()
+		} else {
+			conn.start(queue: queue)
+		}
 
 		if sem.wait(timeout: .now() + timeout + 0.5) == .timedOut {
 			box.lock.lock()
