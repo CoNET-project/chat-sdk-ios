@@ -31,14 +31,14 @@ Native CoNET Chat module for iOS apps. Implements the same WorkerCommand / Worke
 
 1. **File → Add Package Dependencies…**
 2. URL: `https://github.com/CoNET-project/chat-sdk-ios.git`
-3. Dependency rule: **Up to Next Major** from `0.1.8`.
+3. Dependency rule: **Up to Next Major** from `0.1.10`.
 4. Add product **ConetChatSDK** to your app target.
 
 ### `Package.swift`
 
 ```swift
 dependencies: [
-	.package(url: "https://github.com/CoNET-project/chat-sdk-ios.git", from: "0.1.8"),
+	.package(url: "https://github.com/CoNET-project/chat-sdk-ios.git", from: "0.1.10"),
 ],
 targets: [
 	.target(

@@ -89,7 +89,16 @@ public enum BeamioNativeAccountCreate {
 		let probe = BeamioResidueProbe.probe()
 		// A residue (a mnemonic-channel item) blocks a creation only when no account is named at all: an account that is named, valid or not, is
 		// judged by its own state (CR-01, CR-11), and a read that failed is `readFailed` (CR-03).
-		let residueBlocks = probe == .present && inventory.accounts.isEmpty
+		// The pointer is judged as the preread judges it: a pointer that exists but cannot be read or parsed, that names a version or set that is missing, or whose record
+		// does not verify, is unknown (the preread answers read_error); a creation does not go ahead beside it, whatever the inventory lists. Nothing is written.
+		var pointerUnknown = false
+		if let raw = store as? BeamioChatRawItemStoring {
+			switch BeamioMnemonicSets.current(store: raw) {
+			case .readError, .unknown, .verifyFailed: pointerUnknown = true
+			case .ok, .cipher, .confirmedMissing: break
+			}
+		}
+		let residueBlocks = (probe == .present && inventory.accounts.isEmpty) || pointerUnknown
 		switch BeamioNativeSilentSelect.createGuard(userExplicit: userExplicit, enumerated: !inventory.readFailed,
 		                                            sessionIsG2: BeamioConetChatModule.nativeGate() == .g2,
 		                                            g1WithoutKeys: BeamioConetChatModule.nativeGate() == .g1 && held.isEmpty,

@@ -7,19 +7,17 @@ import Foundation
 // 1. artifactURL and artifactSHA256 are set in the lock: SwiftPM fetches the zip and refuses it on a hash mismatch.
 // 2. otherwise a local Vendor/X19.xcframework (installed with scripts/x19/install-x19.sh) is used, development only.
 // 3. otherwise the package builds without X19 and the native C3 path reports pending.
-// BEAMIO_REQUIRE_X19=1 turns case 3 into a build error (and links X-19, see below). The link needs BEAMIO_X19_LINK=1 or BEAMIO_REQUIRE_X19=1;
-// without either, no X-19 is linked. The 1–3 cases above apply only to a linked build.
+// BEAMIO_REQUIRE_X19=1 turns case 3 into a build error. The 1–3 cases above apply to every iOS build.
 // These two values are copied from scripts/x19/X19.artifact.lock. They are literals here, not read from the file, because
 // SwiftPM caches the manifest evaluation by manifest content: a lock change would otherwise be ignored. The check script
 // scripts/x19/verify-x19-artifact-lock.sh fails when they differ from the lock. Change both in the same commit.
-let x19Url = ""
-let x19Sha = "c47f55d9158b9a8c993aa49fb8e78b455bbb2d03426181c76e5634f1cac5eee6"
+let x19Url = "https://github.com/CoNET-project/chat-sdk-ios/releases/download/v0.1.10/X19.xcframework.zip"
+let x19Sha = "fc32fdb365287a663c0f1ee4954d637c7cdd05deedd9609d5809966e89249d62"
 let x19Vendor = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Vendor/X19.xcframework").path
 let x19Required = ProcessInfo.processInfo.environment["BEAMIO_REQUIRE_X19"] == "1"
-// until the owner rules on, X-19 is linked only into a QA or other opted-in build (BEAMIO_X19_LINK=1). A build without it
-// links no X-19, so a Release build has no Go runtime and no X19 symbols. BEAMIO_REQUIRE_X19=1 implies the link (it is a QA setting too).
-// X-19 is linked by default on iOS (the condition below). The environment is no longer read: an iOS build without the artifact fails
-// in the SDK with an explicit #error (X19Required.swift), and a macOS `swift test` does not link X-19 (it is iOS only).
+// X-19 is linked by default on iOS (the condition below). The environment is not read for the link: the locked zip is fetched from the release
+// URL above, and an iOS build without the artifact fails in the SDK with an explicit #error (X19Required.swift). A macOS `swift test` does not
+// link X-19 (it is iOS only).
 let x19LinkRequested = true
 
 // The test hooks (`#if BEAMIO_TEST_HOOKS`) of the SDK and of its tests. They are defined only when BEAMIO_TEST_HOOKS=1 is set

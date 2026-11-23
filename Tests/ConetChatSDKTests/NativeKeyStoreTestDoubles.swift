@@ -21,6 +21,8 @@ final class MemoryNativeKeyStore: BeamioChatMnemonicKeyStoring {
 
 	/// Test seam: raw accounts whose read fails (the marker of E9.10.3 G1-NK-S1, a read failure of MARK).
 	var failRawReadAccounts: Set<String> = []
+	/// The store cannot list its raw items (rawAccountNames answers nil).
+	var rawNamesUnavailable = false
 
 	/// Test seam: mnemonic items whose failed read is transient (a locked keychain). Default: every failure is deterministic.
 	var transientReadOwners: Set<String> = []
@@ -136,7 +138,7 @@ final class MemoryNativeKeyStore: BeamioChatMnemonicKeyStoring {
 // MARK: - Raw payloads (25.52Y.163 r2.5.19 第 59(3)(e))
 
 extension MemoryNativeKeyStore: BeamioChatRawItemStoring {
-	func rawAccountNames() -> [String]? { Array(rawAccounts.keys) }
+	func rawAccountNames() -> [String]? { rawNamesUnavailable ? nil : Array(rawAccounts.keys) }
 
 	/// This double keeps a copy of a mnemonic as its phrase bytes (what `rawRead` gives for a live mnemonic item), so the copy is judged as a phrase.
 	func judgeMnemonicPayload(_ bytes: Data, owner: String) -> (state: BeamioMnemonicAccountState, phrase: Data?) {

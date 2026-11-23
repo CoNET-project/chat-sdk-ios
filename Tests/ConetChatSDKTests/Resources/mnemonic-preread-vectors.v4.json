@@ -1,7 +1,7 @@
 {
   "meta": {
     "file": "mnemonic-preread-vectors.v1.json",
-    "status": "（B-1，裁定）",
+    "status": "n/a",
     "generator": "gen-mnemonic-preread-vectors.mjs",
     "spec": "第 60 项（修正第 59(2) 项）",
     "note": "助记词与地址为合成测试值。Android SDK 的预读不带 seq，属于需随规格跟进的实现差异。"

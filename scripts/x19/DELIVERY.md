@@ -6,7 +6,7 @@ The native OpenPGP framework `X19.xcframework` is **not in git**. The SDK and th
 
 | File | Role |
 |---|---|
-| `X19.artifact.lock` | The reviewed lock: `artifactURL` (https, empty until hosted) and `artifactSHA256` (the zip). |
+| `X19.artifact.lock` | The reviewed lock: `artifactURL` (the https release asset) and `artifactSHA256` (the zip). |
 | `X19.xcframework.sha256` | The per-file lock (v4) of the framework inside the zip, plus the MANIFEST. |
 | `Package.swift` (`x19Url`, `x19Sha`) | Copies of the two artifact values. Literals on purpose: SwiftPM caches manifest evaluation by content. |
 | `verify-x19-artifact-lock.sh` | Fails if `Package.swift` and the lock differ. Run before each commit and in CI. |
@@ -16,22 +16,35 @@ The native OpenPGP framework `X19.xcframework` is **not in git**. The SDK and th
 
 ## How the SDK links X19 (`Package.swift`)
 
-0. X-19 is linked only into a QA or other opted-in build. Set `BEAMIO_X19_LINK=1` for it (or `BEAMIO_REQUIRE_X19=1`, which implies it). A build without either links no X-19: no X19 module, no Go runtime. Release builds must not set either, until the owner rules on §25.34.
+0. X-19 is linked into every iOS build (macOS does not link it). The environment variables `BEAMIO_X19_LINK` and `BEAMIO_REQUIRE_X19` no longer decide the link.
 1. `x19Url` and `x19Sha` set: `.binaryTarget(url:checksum:)`. SwiftPM downloads the zip over https and refuses it on a SHA-256 mismatch.
 2. Otherwise a local `Vendor/X19.xcframework` (installed by `install-x19.sh`) is linked. Development only.
 3. Otherwise X19 is not linked and C3 reports `pgp_native_pending`.
-4. `BEAMIO_REQUIRE_X19=1` turns case 3 into a build error. It is a QA setting now, not a Release one.
-5. Verification: `scripts/x19/verify-no-x19-in-binary.sh <built Release test bundle or app>` must exit 0 for a Release build. A QA build with `BEAMIO_X19_LINK=1` is the positive control and must exit 1 with the same script. Use a separate `-derivedDataPath` for each configuration: SwiftPM caches the manifest evaluation.
+4. `BEAMIO_REQUIRE_X19=1` also turns case 3 into a build error. On iOS case 3 cannot pass anyway: a build without the artifact fails with the explicit `#error` of `X19Required.swift`.
+5. Verification: `scripts/x19/verify-no-x19-in-binary.sh <binary | bundle | framework | archive | app>` reports whether a built product holds X-19 symbols. X-19 is linked into every iOS build, so for an iOS build it exits 1 (X-19 present); a macOS build links none. Use a separate `-derivedDataPath` for each configuration: SwiftPM caches the manifest evaluation.
 
-## Steps to publish (not done; needs the project owner's approval)
+## Steps to publish (done for v0.1.10; the project owner decided the hosting)
 
 1. Build X19 with `scripts/x19/build-x19-xcframework.sh` (or reuse the verified v4 framework), and check it with `verify-x19-xcframework.sh`.
 2. `make-x19-artifact.sh <X19.xcframework> <folder outside the repo>` prints the zip's SHA-256.
-3. Upload the zip to an https location the project owns. (Not decided.)
+3. Upload the zip, named `X19.xcframework.zip`, as the asset of the GitHub Release of the version (`releases/download/<tag>/X19.xcframework.zip`). Upload the locked file itself: a re-packed zip has another SHA-256.
 4. In one commit: set `artifactURL` in `X19.artifact.lock` and the same value in `Package.swift`, and set `artifactSHA256`. Run `verify-x19-artifact-lock.sh`.
-6. Shell: pin the SDK commit; SwiftPM resolves the binary with the same checksum. QA builds set `BEAMIO_X19_LINK=1`; Release builds set neither variable.
+6. Shell: pin the SDK version (tag `v0.1.10`) or its commit; SwiftPM resolves the binary with the same checksum. No environment variable is needed.
 
-## Current artifact: v5 (2026-11-13)
+## Current artifact: v6 (2026-11-23, clean rebuild of v5)
+
+- Same wrapper source and module set as v5; the functions are the same (`Argon2IDKey`, `GenerateArmoredKey`, `PublicArmor`, `DecryptArmoredText`). v5 was not published: its binaries held build-machine paths (the build script did not pass `-trimpath`).
+- Build (`build-x19-xcframework.sh`): `gomobile bind -target=ios -trimpath -ldflags="-s -w -buildid="`, a fixed neutral work folder (`/tmp/x19w`), `ZERO_AR_DATE=1`, the framework version fixed at 0.0.1, `CGO_CFLAGS`/`-ffile-prefix-map`, offline (`GOPROXY=off` or a file proxy over the module cache), `go.mod` and `go.sum` unchanged. `go mod verify` passes.
+- Builds from the same inputs are byte-identical in all 15 files: the script also sorts the slices of the top `Info.plist` (gomobile writes them in a changing order). Twelve consecutive builds with `build-x19-xcframework.sh` in a clean folder gave the same files and the same zip (see the results in the review record). The zip is packed by `pack-x19-artifact.py` (fixed order and times, no `__MACOSX`), and two packings are identical.
+- Zip (`X19.xcframework.zip`): SHA-256 `fc32fdb365287a663c0f1ee4954d637c7cdd05deedd9609d5809966e89249d62`, 7,172,867 bytes (in `X19.artifact.lock` and `Package.swift`).
+- Per-file lock (v6): device slice `0dc30b95…`, simulator slice `b9b4d106…`, Info.plist `2e8ab775…` (unchanged), MANIFEST `471394bd…` (15 files).
+- Scan: no `/Users/`, user name, `/private/tmp`, session folder, module-cache or toolchain path in either slice (`strings -a`); `nm`: `X19Argon2IDKey`, `X19GenerateArmoredKey`, `X19PublicArmor`, `X19DecryptArmoredText` present, no websocket, net/http, net.Dial or net.Listen symbols. This is a symbol-level check, not a reachability audit.
+
+- Toolchain: Go 1.27.4 from Homebrew (`go1.27.4 darwin/arm64`), which is not the officially archived toolchain of the earlier builds. A comparison rebuild with the official archive is a follow-up after publication.
+- Modules: the module cache passes `go mod verify` against `go.sum`; `go.mod` and `go.sum` are unchanged. For this build three modules (golang.org/x/tools v0.52.0, x/mod v0.42.0, x/sync v0.25.0) and the `go.mod` files of eight older dependency versions were fetched with the checksum database on.
+- govulncheck: the result of 2026-11-13 (v5, same source and modules) is carried over; it is rerun after publication.
+
+## Previous artifact: v5 (2026-11-13, not published)
 
 - Change from v4: `Argon2IDKey(password, salt, memoryKB, iterations, parallelism, keyLen)` (`scripts/x19/wrapper/x19/x19.go`):
   Argon2id, version 0x13 (v = 19), the recovery-record KDF of spec 25.42.5 step 6 (PWA `deriveAesKeyFromPassword`). The project lead
@@ -76,7 +89,7 @@ Earlier v3 record (for history): zip `209971ea…`, device `5abd6b38…`, simula
 - Wrapper tests: `go test ./x19/ -run DecryptArmoredText` passes (4 cases: CRLF in a text literal, lone CR, binary literal unchanged, binary literal not UTF-8). `go vet` passes.
 - govulncheck: `govulncheck -mode source ./...` in the wrapper, v1.9.0 built from the cached module (no download), Go 1.27.4, vulnerability database read online: **No vulnerabilities found.** Source mode checks reachable code only. The framework is a library, not a Go binary, so binary mode does not apply.
 - Symbol scan of the framework (`nm`): no `websocket`, no `net/http`, no `net.Dial` or `net.Listen` symbols, in v2 and v3 alike. This is a symbol-level check, not a full reachability audit.
-- Not reproducible from source: a rebuild in another folder gives different binaries (see the lock header). The reviewed framework behind the lock is the trust root.
+- Older builds were not reproducible; v6 is (see above).
 
 Earlier v2 record (for history, in git at commit 96308fb): device `4e0486e8…`, simulator `fecfec91…`, Info.plist `2e8ab775…`, manifest `4fcaff08…`. Its zip (SHA-256 `6b7dc2b9…`) was packed locally during item 2 and is superseded by v3; it was not kept in the repo.
 
@@ -91,7 +104,7 @@ Earlier v2 record (for history, in git at commit 96308fb): device `4e0486e8…`,
 - Needs an https host and a publication step, which is an outward action (needs approval).
 - Builds need network access to the host; an offline build must use the development path.
 - The zip's SHA-256 depends on the zip bytes. Whoever re-packs the framework must update the lock.
-- The framework is not reproducible from source (see `X19.xcframework.sha256` header). The trust root is the reviewed framework behind the lock.
+- The trust root is the reviewed framework behind the lock; v6 can be rebuilt byte for byte from the same inputs.
 - SwiftPM caches manifest evaluation by content. After a manifest-only change that does not touch `Package.swift`, reset the cache (`swift package reset`) to be sure.
 
 ## Not verified here

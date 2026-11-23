@@ -345,7 +345,11 @@ enum BeamioPwaWalletSync {
 			switch BeamioMnemonicSets.current(store: raw) {
 			case .ok(let eoa, let phrase): return Reading(state: .valid, eoa: eoa, phrase: phrase)
 			case .cipher(let eoa, let envelope): return Reading(state: .valid, eoa: eoa, phrase: nil, cipher: envelope)
-			case .confirmedMissing: break
+			case .confirmedMissing:
+				// No pointer. A v3 cipher version item without a pointer is a record the pointer failed to name (the version is written before the pointer):
+				// the answer is a read failure, never "missing". Retrying the same envelope writes the pointer. A version of an identity that was cleared is ignored
+				// with it. A store that cannot list its items, or an unreadable marker, is unknown too.
+				guard BeamioMnemonicSets.orphanVersionsBlock(store: store) == false else { return .unknown }
 			case .readError, .unknown, .verifyFailed: return .unknown
 			}
 		}

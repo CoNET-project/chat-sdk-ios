@@ -1098,6 +1098,18 @@ public enum BeamioResidueProbe {
 	static let walletPrefixes = ["mnemonic:", "commit:", "intent:"]
 	static let pgpServices = ["com.beamio.beamio.chat-pgp", "com.beamio.beamio.chat-pgp-k"]
 
+	/// Whether a list of account names holds a residue: an item of the mnemonic channel (one of the prefixes), or an orphan v3 cipher version item
+	/// (`mnemonic.set.<eoa>.c.<digest>`, the pointer `mnemonic.current` is missing). The version is written before the pointer, so a refused pointer write leaves an orphan: a
+	/// recorded account that no inventory lists, and a creation must not go ahead beside it. The condition is the one of the preread (`BeamioPwaWalletSync.reading`).
+	/// With a pointer the versions are named and the account is judged by its own state. The versions of an identity that was cleared on purpose are ignored with it; an
+	/// unreadable marker blocks (unknown).
+	static func hasResidue(in names: [String], prefixes: [String]) -> Bool {
+		if names.contains(where: { name in prefixes.contains { name.hasPrefix($0) } }) { return true }
+		if names.contains(BeamioMnemonicSets.currentName) { return false }
+		let owners = Set(names.compactMap { BeamioMnemonicSets.cipherVersionOwner(inAccount: $0)?.lowercased() })
+		return BeamioMnemonicSets.orphanVersionsBlock(owners: owners, cleared: BeamioIdentityCleared.read(store: BeamioNativeWallet.keyStore))
+	}
+
 	/// The account names of one service, from the attributes only. nil when the enumeration fails or any row has no account name.
 	static func accounts(service: String) -> [String]? {
 		let query: [String: Any] = [
@@ -1129,11 +1141,11 @@ public enum BeamioResidueProbe {
 		if overrideForTests != nil { return probe() }
 		if BeamioChatWalletTestMemory.on {
 			let walletAccounts = BeamioChatWalletTestMemory.accounts(walletService)
-			return walletAccounts.contains(where: { name in ["mnemonic:", "commit:"].contains { name.hasPrefix($0) } }) ? .present : .absent
+			return hasResidue(in: walletAccounts, prefixes: ["mnemonic:", "commit:"]) ? .present : .absent
 		}
 		#endif
 		guard let walletAccounts = accounts(service: walletService) else { return .failed }
-		if walletAccounts.contains(where: { name in ["mnemonic:", "commit:"].contains { name.hasPrefix($0) } }) { return .present }
+		if hasResidue(in: walletAccounts, prefixes: ["mnemonic:", "commit:"]) { return .present }
 		for service in pgpServices {
 			guard accounts(service: service) != nil else { return .failed }
 		}
@@ -1147,11 +1159,11 @@ public enum BeamioResidueProbe {
 		// would read as a failed probe). The PGP services are not in that memory and are absent here.
 		if BeamioChatWalletTestMemory.on {
 			let walletAccounts = BeamioChatWalletTestMemory.accounts(walletService)
-			return walletAccounts.contains(where: { name in walletPrefixes.contains { name.hasPrefix($0) } }) ? .present : .absent
+			return hasResidue(in: walletAccounts, prefixes: walletPrefixes) ? .present : .absent
 		}
 		#endif
 		guard let walletAccounts = accounts(service: walletService) else { return .failed }
-		if walletAccounts.contains(where: { name in walletPrefixes.contains { name.hasPrefix($0) } }) { return .present }
+		if hasResidue(in: walletAccounts, prefixes: walletPrefixes) { return .present }
 		// The PGP services are listed so that a failed listing still fails closed, but their items are not residue (Y.163 第 32 項 行 4).
 		for service in pgpServices {
 			guard accounts(service: service) != nil else { return .failed }

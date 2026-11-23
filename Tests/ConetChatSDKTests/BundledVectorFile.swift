@@ -27,7 +27,7 @@ enum BundledVectorFile {
 		"shell-record-passcode-not-provided.v2": "0833f6ab0d3f2ea7ca1ec2676e993587310c521671187923e7a692121307227b",
 		"shell-record-passcode-not-provided.v1": "c05180134dac9949f16ae138cc36b8c605c9a1ab435e8cc83d34c04f8b13e3b2",
 		// preread as the current record, result.code shape: v4 replaces v1 for the answer shape; v1 stays unchanged
-		"mnemonic-preread-vectors.v4": "c179639a927fd3cb145dbccfde82f82bbaeff9468bc0eff899fdcf2f8950a22e",
+		"mnemonic-preread-vectors.v4": "89f2c2a0635b729db412b0a68c180f44fdaedea61bee210954af0182f61bbbdc",
 		"preread-returns-current-record-as-is.v1": "aa8d0d708a9d28dde25865ab40e2a64dd9976d10116d59ee3a44ac09d78e263d",
 		"mnemonic-cipher-format.v3": "9fc7d40681c51504b7596ef8fa180712f283ebc07fadffa882af1299d8d38842",
 		"mnemonic-cipher-format.v4": "4b44afd8f8109473409fb0c3126440551901e9f270dc3330ba6a2c5510fab726",
@@ -59,7 +59,7 @@ enum BundledVectorFile {
 		// account-select vectors v2 (25.52Y.163 r2.5.17, 335 cases; AS v2 a9b8d563, unchanged at r2.5.19; supersedes r2.5.11 c9b15003 (326 cases)).
 		"account-select-vectors.v2": "a9b8d563bba51a0adf444aeac252ccc37201928dc614014fa67f80f45b099d1c",
 		// r2.5.19 (, 第 60(7) 项): the mnemonic preread vectors, NP-01 to NP-13 (13 cases).
-		"mnemonic-preread-vectors.v1": "9f6235e1c4f6e09a6cdd591cf78935d66b6838b7ee90c9dcd20720f7ab0b918a",
+		"mnemonic-preread-vectors.v1": "c90b54897827d303d0b9566595b498685d024cefe3ae062ba39e2bec4e4039f9",
 		// r2.5.19 (, 第 59(5) 项): the native-open vectors, 42 cases; nativeImportOpen answers unknown_command (N-01, N-04 to N-06, N-10a, N-11, N-12, N-18).
 		"native-open-vectors.v1": "49ceb083343b028bdf1d7d5e5316ce716a60ef4459441ce50ec14d251a22079f",
 		// interface spec v160 to v162 (2026-11-21), new files: the shellRecordRead answer shape (11 cases), the not_ready reasons (8) and the unreadable causes (5).

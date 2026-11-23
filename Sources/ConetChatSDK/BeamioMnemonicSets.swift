@@ -80,6 +80,35 @@ enum BeamioMnemonicSets {
 		return owner.isEmpty || owner.contains(".") ? nil : owner
 	}
 
+	/// The owner of a v3 cipher version item name `mnemonic.set.<eoa>.c.<digest>`; nil for any other name (including the plaintext sets).
+	static func cipherVersionOwner(inAccount account: String) -> String? {
+		guard account.hasPrefix(setPrefix) else { return nil }
+		let rest = account.dropFirst(setPrefix.count)
+		guard let marker = rest.range(of: ".c.") else { return nil }
+		let owner = String(rest[rest.startIndex ..< marker.lowerBound])
+		let digest = rest[marker.upperBound...]
+		return owner.isEmpty || owner.contains(".") || digest.isEmpty ? nil : owner
+	}
+
+	/// Whether the orphan v3 cipher versions (no pointer names them) block: any version of an identity that was not cleared. A version of an identity that was
+	/// cleared on purpose is ignored with that identity (the marker), as its account is. An unreadable marker is unknown: it blocks.
+	static func orphanVersionsBlock(owners: Set<String>, cleared: BeamioIdentityCleared.Reading) -> Bool {
+		if owners.isEmpty { return false }
+		switch cleared {
+		case .unreadable: return true
+		case .ok(let ignored): return !owners.isSubset(of: ignored)
+		}
+	}
+
+	/// For a store whose pointer is confirmed missing: true when orphan versions block, false when there is none to count, nil when the items cannot be listed
+	/// (unknown: the caller reads it as a read failure, never as "none").
+	static func orphanVersionsBlock(store: BeamioChatWalletKeyStoring) -> Bool? {
+		guard let raw = store as? BeamioChatRawItemStoring else { return false }
+		guard let names = raw.rawAccountNames() else { return nil }
+		let owners = Set(names.compactMap { cipherVersionOwner(inAccount: $0)?.lowercased() })
+		return orphanVersionsBlock(owners: owners, cleared: BeamioIdentityCleared.read(store: store))
+	}
+
 	private static func setBytes(eoa: String, phrase: Data, utc: String) -> Data? {
 		guard let text = String(data: phrase, encoding: .utf8) else { return nil }
 		let record: [String: Any] = ["v": formatVersion, "mode": "keychain", "eoa": eoa, "phrase": text, "utc": utc]

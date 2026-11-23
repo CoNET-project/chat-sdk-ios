@@ -2,8 +2,8 @@
 # Package.swift reads artifactURL and artifactSHA256 from this file. SwiftPM checks the zip's SHA-256 when it fetches
 # the binary target and refuses the build on a mismatch. The per-file lock is scripts/x19/X19.xcframework.sha256.
 #
-# artifactURL is empty until the project owner decides where the zip is hosted. While it is empty, a local
-# Vendor/X19.xcframework (installed with install-x19.sh) is used for development, and no build is marked as release.
+# artifactURL is the GitHub Release asset of v0.1.10 in this repository (the project owner decided the hosting). SwiftPM fetches it over
+# https and checks artifactSHA256. A local Vendor/X19.xcframework (installed with install-x19.sh) is still used for development when no URL is set.
 artifactName=X19.xcframework.zip
-artifactURL=
-artifactSHA256=c47f55d9158b9a8c993aa49fb8e78b455bbb2d03426181c76e5634f1cac5eee6
+artifactURL=https://github.com/CoNET-project/chat-sdk-ios/releases/download/v0.1.10/X19.xcframework.zip
+artifactSHA256=fc32fdb365287a663c0f1ee4954d637c7cdd05deedd9609d5809966e89249d62

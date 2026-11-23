@@ -1,10 +1,9 @@
-# X19.xcframework lock (X-19 v5, built 2026-11-13). Format: <sha256> <path inside X19.xcframework>
-# v5 adds Argon2IDKey (argon2id v19 for the native recovery engine, spec 25.42; 2026-11-13: approved through this wrapper,
-# golang.org/x/crypto/argon2, no new module). v4 (e79589f) added GenerateArmoredKey and PublicArmor. v3 (1cebd2f) added
-# DecryptArmoredText. v2 (96308fb) is in git history.
+# X-19 v6 lock (clean rebuild, 2026-11-23). Format: <sha256> <path inside X19.xcframework>
+# v6 is the same wrapper source and module set as v5 (Argon2IDKey, GenerateArmoredKey, PublicArmor, DecryptArmoredText), built with -trimpath, a neutral
+# work folder (/tmp/x19w), ZERO_AR_DATE=1 and a fixed framework version, so that the binaries hold no path of the build machine and two builds are
+# byte-identical (see build-x19-xcframework.sh and DELIVERY.md). v5 held build-machine paths and was withdrawn before publication.
 # The MANIFEST line is the SHA-256 of the sorted list of all files (see verify-x19-xcframework.sh).
-# The binaries are not reproducible from source (see build-x19-xcframework.sh). This lock is the reference build.
-a938eada94eeb97a0d4597747289d22bd9c434c854c8f5c049d92595ee248c45  ios-arm64/X19.framework/X19
-8a181346409afe1dd7b9efd888c87379fee031cac7b4558f83eae811a31063e8  ios-arm64_x86_64-simulator/X19.framework/X19
+0dc30b95f6c550694ca3077e0bfe77d2ca4ad402d2a366b1343a64e6212e4b03  ios-arm64/X19.framework/X19
+b9b4d1062b477ea02f896d4f087c79645ecd0e81c23c7c47a2fb0d90fb71c12f  ios-arm64_x86_64-simulator/X19.framework/X19
 2e8ab7755da63f6baaca7c91332197e83c8f94a90f53a2a6fb76a99bf2c786d1  Info.plist
-a898df66032fd3d6c6e49452313d8bb0d529b8b40967497cd722a6fd59dda6c8  MANIFEST (15 files)
+471394bdc56543fc36820bb67b916e01029c1e873d70e1ca007865628c768493  MANIFEST (15 files)
