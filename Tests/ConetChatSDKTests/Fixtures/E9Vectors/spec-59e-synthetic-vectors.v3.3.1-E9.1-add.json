@@ -1,0 +1,305 @@
+{
+  "file": "spec-59e-synthetic-vectors.v3.3.1-E9.1-add.json",
+  "scope": "startup-classification-and-write-residue-synthetic",
+  "status": "pending_review",
+  "extends": "spec-59e-errata-v3.3.1-E9.md (E9-01..E9-12) and spec-59e-errata-v3.3.1-E9.1.md (E91-01..E91-08)",
+  "decision_source": "裁定 2026-11-17 (依原话 2026-11-17 与常设约束“不删数据”)",
+  "fixtures_note": "Synthetic only. No real mnemonic, key or account. Digests are synthetic placeholders. 'isolated' means renamed to an isolation name with an audit row; nothing is deleted.",
+  "cases": [
+    {
+      "id": "E91-01",
+      "title": "REC 不可解密；助记词位置中仅 MNEM 为本次未完成写入且读取失败（半写）→ 忽略，其余可读为空 → onboarding",
+      "policy": "decided",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "keystore_enumerate": "ok",
+          "wallet.rec": "UNDECRYPTABLE (aead_failed); REC holds no mnemonic field",
+          "wallet.mnem": "READ_FAILED",
+          "intent_marker": {
+            "state": "pending_unfinished_write",
+            "target": "wallet.mnem"
+          },
+          "other_mnemonic_locations": "readable_empty"
+        }
+      },
+      "op": {
+        "command": "startup_classify",
+        "pwa_preread_first": true
+      },
+      "expect": {
+        "classification": "confirmed_no_valid_mnemonic",
+        "answer_to_startup": "onboarding",
+        "half_write_read_failure_ignored": true,
+        "deleted": [],
+        "files": {
+          "wallet.rec": "UNDECRYPTABLE",
+          "intent_marker": "retained"
+        }
+      },
+      "source": "E9.1-1 第 1、2 项"
+    },
+    {
+      "id": "E91-02",
+      "title": "非未完成写入的 MNEM 读取失败（无标记指向它）→ unknown，保留，不进入 onboarding",
+      "policy": "decided",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "keystore_enumerate": "ok",
+          "wallet.rec": "READABLE_NO_MNEMONIC",
+          "wallet.mnem": "READ_FAILED",
+          "intent_marker": "absent",
+          "other_mnemonic_locations": "readable_empty"
+        }
+      },
+      "op": {
+        "command": "startup_classify",
+        "pwa_preread_first": true
+      },
+      "expect": {
+        "classification": "unknown",
+        "answer_to_startup": "retain_and_retry",
+        "onboarding_entered": false,
+        "deleted": []
+      },
+      "source": "E9.1-1 第 2 项（不属于未完成写入的读取失败）"
+    },
+    {
+      "id": "E91-03",
+      "title": "钥库不可用，或需要用户解锁 → unknown，保留，不进入 onboarding",
+      "policy": "decided",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "keystore_enumerate": "unavailable_or_requires_user_unlock",
+          "mnemonic_locations_read": "not_read"
+        }
+      },
+      "op": {
+        "command": "startup_classify",
+        "pwa_preread_first": true
+      },
+      "expect": {
+        "classification": "unknown",
+        "answer_to_startup": "retain_and_retry",
+        "onboarding_entered": false,
+        "deleted": []
+      },
+      "source": "E9.1-1 第 2 项（钥库不可用或需解锁）"
+    },
+    {
+      "id": "E91-04",
+      "title": "标记与记录不一致（marker_mismatch），助记词位置全部可读且为空 → onboarding（不算读取失败）",
+      "policy": "decided",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "keystore_enumerate": "ok",
+          "wallet.rec": "READABLE_NO_MNEMONIC",
+          "wallet.mnem": "absent",
+          "intent_marker": "mismatch_with_rec",
+          "mnemonic_locations_read": "all_ok",
+          "mnemonic_locations_valid": 0
+        }
+      },
+      "op": {
+        "command": "startup_classify",
+        "pwa_preread_first": true
+      },
+      "expect": {
+        "classification": "confirmed_no_valid_mnemonic",
+        "answer_to_startup": "onboarding",
+        "deleted": []
+      },
+      "source": "E9.1-3"
+    },
+    {
+      "id": "E91-05",
+      "title": "walletStatus 应答与分类一致：确认无有效助记词 → no_key；读取失败 → unknown（not_ready/unreadable）",
+      "policy": "decided; family command rules unchanged",
+      "pre": [
+        {
+          "case": "a",
+          "native_classification": "confirmed_no_valid_mnemonic"
+        },
+        {
+          "case": "b",
+          "native_classification": "unknown_read_failure"
+        }
+      ],
+      "op": {
+        "command": "walletStatus"
+      },
+      "expect": [
+        {
+          "case": "a",
+          "walletStatus": "no_key",
+          "startup": "onboarding"
+        },
+        {
+          "case": "b",
+          "walletStatus": {
+            "status": "not_ready",
+            "notReadyReason": "unreadable"
+          },
+          "startup": "retain_and_retry"
+        }
+      ],
+      "source": "E9.1-4；不改 §25.52CS.2 (a) 对族命令的规定"
+    },
+    {
+      "id": "E91-06",
+      "title": "WK-42 启动期望：原名可读、EOA 与标记不一致，无有效助记词 → onboarding",
+      "policy": "decided",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "keystore_enumerate": "ok",
+          "wallet.rec": "READABLE_EOA_MISMATCH_WITH_MARKER",
+          "wallet.mnem": "absent",
+          "mnemonic_locations_read": "all_ok",
+          "mnemonic_locations_valid": 0
+        }
+      },
+      "op": {
+        "command": "startup_classify",
+        "pwa_preread_first": true
+      },
+      "expect": {
+        "classification": "confirmed_no_valid_mnemonic",
+        "answer_to_startup": "onboarding",
+        "deleted": [],
+        "files": {
+          "wallet.rec": "READABLE_EOA_MISMATCH_WITH_MARKER"
+        }
+      },
+      "source": "E9.1-5（WK-42 启动期望）"
+    },
+    {
+      "id": "E91-07",
+      "title": "（f）残留意图标记与部分记录 + onboarding 后新账户写入 → 成功；旧产物全部在隔离名下，无删除，有审计",
+      "policy": "decided",
+      "pre": {
+        "state": "onboarding_entered",
+        "native": {
+          "wallet.rec": "PARTIAL_OLD_REC",
+          "wallet.mnem": "absent",
+          "intent_marker": {
+            "state": "active",
+            "name": "wallet.discard.intent-or-wallet.isolation.pending"
+          },
+          "isolated_pattern": {
+            "count": 0
+          }
+        }
+      },
+      "op": {
+        "command": "pwaWalletSync",
+        "trustedOrigin": true,
+        "reqId": 21,
+        "seq": 1,
+        "eoa": "NEW_REC.eoa",
+        "phrase": "<synthetic>"
+      },
+      "expect": {
+        "answer": {
+          "ok": true,
+          "result.sync": "updated"
+        },
+        "pre_write_steps": [
+          "isolate residue wallet.rec -> isolated_name (audit row, no delete)",
+          "isolate active marker -> isolated_name (audit row, no delete)",
+          "write new account per existing spec"
+        ],
+        "files": {
+          "wallet.rec": "NEW_REC",
+          "isolated_pattern": {
+            "present": true,
+            "count": 2,
+            "contains": [
+              "PARTIAL_OLD_REC",
+              "active_marker"
+            ]
+          }
+        },
+        "deleted": [],
+        "audit_append": [
+          "isolate PARTIAL_OLD_REC",
+          "isolate active marker",
+          "write wallet.rec (sha NEW_REC)"
+        ],
+        "residue_blocks_write": false,
+        "intent_marker": "cleared (active marker moved to isolated name)"
+      },
+      "source": "E9.1-6"
+    },
+    {
+      "id": "E91-08",
+      "title": "（f 失败分支）残留标记 + 写入失败 → 回 write_failed，全部数据保留（原件与隔离副本），无删除",
+      "policy": "decided",
+      "pre": {
+        "state": "onboarding_entered",
+        "native": {
+          "wallet.rec": "PARTIAL_OLD_REC",
+          "intent_marker": {
+            "state": "active"
+          },
+          "isolated_pattern": {
+            "count": 0
+          }
+        }
+      },
+      "op": {
+        "command": "pwaWalletSync",
+        "trustedOrigin": true,
+        "reqId": 22,
+        "seq": 1,
+        "eoa": "NEW_REC.eoa",
+        "phrase": "<synthetic>",
+        "inject_fault": "storage_write_fails_after_isolation"
+      },
+      "expect": {
+        "answer": {
+          "ok": false,
+          "error": "write_failed",
+          "reason": "storage_write"
+        },
+        "files": {
+          "isolated_pattern": {
+            "present": true,
+            "count": 2,
+            "contains": [
+              "PARTIAL_OLD_REC",
+              "active_marker"
+            ]
+          }
+        },
+        "deleted": [],
+        "audit_append": [
+          "isolate PARTIAL_OLD_REC",
+          "isolate active marker"
+        ],
+        "data_retained": true
+      },
+      "source": "E9.1-6 第 3 项"
+    }
+  ],
+  "not_pinned": true,
+  "not_in_spec": true
+}

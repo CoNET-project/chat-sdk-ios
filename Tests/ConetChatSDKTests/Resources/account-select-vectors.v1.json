@@ -1,0 +1,474 @@
+{
+ "file": "account-select-vectors.v1.json",
+ "spec": "25.52Y.160（Y.159 B 的两个新命令， 批准 2026-11-16，限本地开发与 QA，不含发布）",
+ "generator": "gen-account-select-vectors.mjs",
+ "platform": "iOS only (Android single-slot storage has no account pointer; Y.159 第 13 项)",
+ "note": "Synthetic addresses only. No keys. The page never selects an account automatically.",
+ "cases": [
+  {
+   "id": "AS-01",
+   "title": "walletStatus：多把钥且指针为空（ambiguous）：not_ready + unreadable，不答 no_key",
+   "rule": "Y.159 A、Y.160 第 1 项",
+   "input": {
+    "op": "walletStatus",
+    "state": {
+     "keys": [
+      "0x1111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222"
+     ],
+     "pointer": null,
+     "unreadable": false
+    }
+   },
+   "expect": {
+    "status": "not_ready",
+    "notReadyReason": "unreadable"
+   }
+  },
+  {
+   "id": "AS-02",
+   "title": "walletStatus：单把钥、指针为空：G1 not_ready + g1_uninitialized（不是 ambiguous）",
+   "rule": "Y.159 A、§25.52GZ.1",
+   "input": {
+    "op": "walletStatus",
+    "state": {
+     "keys": [
+      "0x1111111111111111111111111111111111111111"
+     ],
+     "pointer": null,
+     "unreadable": false
+    }
+   },
+   "expect": {
+    "status": "not_ready",
+    "notReadyReason": "g1_uninitialized"
+   }
+  },
+  {
+   "id": "AS-03",
+   "title": "walletStatus：无钥、指针为空：no_key（G0）",
+   "rule": "Y.159 A",
+   "input": {
+    "op": "walletStatus",
+    "state": {
+     "keys": [],
+     "pointer": null,
+     "unreadable": false
+    }
+   },
+   "expect": {
+    "status": "no_key"
+   }
+  },
+  {
+   "id": "AS-04",
+   "title": "walletStatus：钥不可读：not_ready + unreadable（fail closed）",
+   "rule": "Y.159 A",
+   "input": {
+    "op": "walletStatus",
+    "state": {
+     "keys": [
+      "0x1111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222"
+     ],
+     "pointer": null,
+     "unreadable": true
+    }
+   },
+   "expect": {
+    "status": "not_ready",
+    "notReadyReason": "unreadable"
+   }
+  },
+  {
+   "id": "AS-05",
+   "title": "accountCandidates：ambiguous 时返回全部候选，仅小写公开地址，升序",
+   "rule": "Y.160 第 1 项",
+   "input": {
+    "op": "accountCandidates",
+    "state": {
+     "keys": [
+      "0x3333333333333333333333333333333333333333",
+      "0x1111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222"
+     ],
+     "pointer": null,
+     "unreadable": false
+    }
+   },
+   "expect": {
+    "code": "ok",
+    "candidates": [
+     "0x1111111111111111111111111111111111111111",
+     "0x2222222222222222222222222222222222222222",
+     "0x3333333333333333333333333333333333333333"
+    ]
+   }
+  },
+  {
+   "id": "AS-06",
+   "title": "accountCandidates：单钥（非 ambiguous）：not_available，不返回清单（不产生空清单）",
+   "rule": "Y.160 第 1 项",
+   "input": {
+    "op": "accountCandidates",
+    "state": {
+     "keys": [
+      "0x1111111111111111111111111111111111111111"
+     ],
+     "pointer": null,
+     "unreadable": false
+    }
+   },
+   "expect": {
+    "code": "not_available"
+   }
+  },
+  {
+   "id": "AS-07",
+   "title": "accountCandidates：无钥：not_available",
+   "rule": "Y.160 第 1 项",
+   "input": {
+    "op": "accountCandidates",
+    "state": {
+     "keys": [],
+     "pointer": null,
+     "unreadable": false
+    }
+   },
+   "expect": {
+    "code": "not_available"
+   }
+  },
+  {
+   "id": "AS-08",
+   "title": "accountCandidates：已置位指针：not_available（指针已定，不再是 ambiguous）",
+   "rule": "Y.160 第 1 项",
+   "input": {
+    "op": "accountCandidates",
+    "state": {
+     "keys": [
+      "0x1111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222"
+     ],
+     "pointer": "0x1111111111111111111111111111111111111111",
+     "unreadable": false
+    }
+   },
+   "expect": {
+    "code": "not_available"
+   }
+  },
+  {
+   "id": "AS-09",
+   "title": "accountCandidates：钥不可读：not_ready，不返回候选（fail closed）",
+   "rule": "Y.160 第 1 项",
+   "input": {
+    "op": "accountCandidates",
+    "state": {
+     "keys": [
+      "0x1111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222"
+     ],
+     "pointer": null,
+     "unreadable": true
+    }
+   },
+   "expect": {
+    "code": "not_ready"
+   }
+  },
+  {
+   "id": "AS-10",
+   "title": "accountSelect：候选内地址：ok，原生写指针（小写）",
+   "rule": "Y.160 第 2 项",
+   "input": {
+    "op": "accountSelect",
+    "state": {
+     "keys": [
+      "0x1111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222"
+     ],
+     "pointer": null,
+     "unreadable": false
+    },
+    "eoa": "0x2222222222222222222222222222222222222222"
+   },
+   "expect": {
+    "code": "ok",
+    "eoa": "0x2222222222222222222222222222222222222222",
+    "idempotent": false
+   }
+  },
+  {
+   "id": "AS-11",
+   "title": "accountSelect：大写形式的候选内地址：ok，存为小写",
+   "rule": "Y.160 第 2 项",
+   "input": {
+    "op": "accountSelect",
+    "state": {
+     "keys": [
+      "0x1111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222"
+     ],
+     "pointer": null,
+     "unreadable": false
+    },
+    "eoa": "0x1111111111111111111111111111111111111111"
+   },
+   "expect": {
+    "code": "ok",
+    "eoa": "0x1111111111111111111111111111111111111111",
+    "idempotent": false
+   }
+  },
+  {
+   "id": "AS-12",
+   "title": "accountSelect：清单外地址：account_mismatch，指针不变，不删任何钥",
+   "rule": "Y.160 第 2 项",
+   "input": {
+    "op": "accountSelect",
+    "state": {
+     "keys": [
+      "0x1111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222"
+     ],
+     "pointer": null,
+     "unreadable": false
+    },
+    "eoa": "0x3333333333333333333333333333333333333333"
+   },
+   "expect": {
+    "code": "account_mismatch"
+   }
+  },
+  {
+   "id": "AS-13",
+   "title": "accountSelect：非 ambiguous（单钥）：not_available，不自动选钥",
+   "rule": "Y.160 第 3 项",
+   "input": {
+    "op": "accountSelect",
+    "state": {
+     "keys": [
+      "0x1111111111111111111111111111111111111111"
+     ],
+     "pointer": null,
+     "unreadable": false
+    },
+    "eoa": "0x1111111111111111111111111111111111111111"
+   },
+   "expect": {
+    "code": "not_available"
+   }
+  },
+  {
+   "id": "AS-14",
+   "title": "accountSelect：无钥：not_available",
+   "rule": "Y.160 第 3 项",
+   "input": {
+    "op": "accountSelect",
+    "state": {
+     "keys": [],
+     "pointer": null,
+     "unreadable": false
+    },
+    "eoa": "0x1111111111111111111111111111111111111111"
+   },
+   "expect": {
+    "code": "not_available"
+   }
+  },
+  {
+   "id": "AS-15",
+   "title": "accountSelect：地址格式错误：bad_request",
+   "rule": "Y.160 第 2 项",
+   "input": {
+    "op": "accountSelect",
+    "state": {
+     "keys": [
+      "0x1111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222"
+     ],
+     "pointer": null,
+     "unreadable": false
+    },
+    "eoa": "0xzz"
+   },
+   "expect": {
+    "code": "bad_request"
+   }
+  },
+  {
+   "id": "AS-16",
+   "title": "accountSelect：钥不可读：not_ready",
+   "rule": "Y.160 第 2 项",
+   "input": {
+    "op": "accountSelect",
+    "state": {
+     "keys": [
+      "0x1111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222"
+     ],
+     "pointer": null,
+     "unreadable": true
+    },
+    "eoa": "0x1111111111111111111111111111111111111111"
+   },
+   "expect": {
+    "code": "not_ready"
+   }
+  },
+  {
+   "id": "AS-17",
+   "title": "accountSelect：同一地址重复选择（指针已为该地址）：ok，幂等，不改变指针",
+   "rule": "Y.160 第 4 项",
+   "input": {
+    "op": "accountSelect",
+    "state": {
+     "keys": [
+      "0x1111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222"
+     ],
+     "pointer": "0x1111111111111111111111111111111111111111",
+     "unreadable": false
+    },
+    "eoa": "0x1111111111111111111111111111111111111111"
+   },
+   "expect": {
+    "code": "ok",
+    "eoa": "0x1111111111111111111111111111111111111111",
+    "idempotent": true
+   }
+  },
+  {
+   "id": "AS-18",
+   "title": "accountSelect：指针已为另一地址：not_available（切换须另立流程，本条不切换）",
+   "rule": "Y.160 第 4 项",
+   "input": {
+    "op": "accountSelect",
+    "state": {
+     "keys": [
+      "0x1111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222"
+     ],
+     "pointer": "0x1111111111111111111111111111111111111111",
+     "unreadable": false
+    },
+    "eoa": "0x2222222222222222222222222222222222222222"
+   },
+   "expect": {
+    "code": "not_available"
+   }
+  },
+  {
+   "id": "AS-19",
+   "title": "accountSelect 之后 walletStatus（未 init）：G1，not_ready + g1_uninitialized（unlocked 只在 G2，即 init 成功之后）",
+   "rule": "Y.160 第 5 项、§25.26.4c 第 4 项",
+   "input": {
+    "op": "after",
+    "first": {
+     "keys": [
+      "0x1111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222"
+     ],
+     "pointer": null,
+     "unreadable": false
+    },
+    "select": "0x2222222222222222222222222222222222222222",
+    "then": "walletStatus"
+   },
+   "expect": {
+    "status": "not_ready",
+    "notReadyReason": "g1_uninitialized"
+   }
+  },
+  {
+   "id": "AS-20",
+   "title": "accountSelect 之后 init：选中地址与原生记录一致：ok，进入 G2（按既有流程）",
+   "rule": "Y.160 第 5 项",
+   "input": {
+    "op": "after",
+    "first": {
+     "keys": [
+      "0x1111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222"
+     ],
+     "pointer": null,
+     "unreadable": false
+    },
+    "select": "0x2222222222222222222222222222222222222222",
+    "then": "init",
+    "eoa": "0x2222222222222222222222222222222222222222"
+   },
+   "expect": {
+    "code": "ok",
+    "state": "G2"
+   }
+  },
+  {
+   "id": "AS-21",
+   "title": "accountSelect 之后 init：选中地址与记录不一致：address_mismatch（不写指针）",
+   "rule": "Y.160 第 5 项",
+   "input": {
+    "op": "after",
+    "first": {
+     "keys": [
+      "0x1111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222"
+     ],
+     "pointer": null,
+     "unreadable": false
+    },
+    "select": "0x2222222222222222222222222222222222222222",
+    "then": "init",
+    "eoa": "0x3333333333333333333333333333333333333333"
+   },
+   "expect": {
+    "code": "address_mismatch",
+    "state": "ambiguous_or_pointer_kept"
+   }
+  },
+  {
+   "id": "AS-22",
+   "title": "选择前后钥匙串条目不删除：钥数不变",
+   "rule": "Y.160 第 2 项（禁止删除）",
+   "input": {
+    "op": "afterKeys",
+    "first": {
+     "keys": [
+      "0x1111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222"
+     ],
+     "pointer": null,
+     "unreadable": false
+    },
+    "select": "0x1111111111111111111111111111111111111111"
+   },
+   "expect": {
+    "keysAfter": [
+     "0x1111111111111111111111111111111111111111",
+     "0x2222222222222222222222222222222222222222"
+    ]
+   }
+  },
+  {
+   "id": "AS-23",
+   "title": "候选清单只含公开地址：每项为 0x 加 40 位十六进制，无其它字段",
+   "rule": "Y.160 第 1 项、第 6 项",
+   "input": {
+    "op": "candidateShape",
+    "state": {
+     "keys": [
+      "0x1111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222"
+     ],
+     "pointer": null,
+     "unreadable": false
+    }
+   },
+   "expect": {
+    "allPublic": true,
+    "count": 2
+   }
+  }
+ ]
+}

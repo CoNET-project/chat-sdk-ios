@@ -1,0 +1,1997 @@
+{
+  "file": "native-open-vectors.v1.json",
+  "purpose": "原生导入页与恢复页的打开命令（spec §25.41）：正式命令名、无别名、入参、应答码、宿主三态、结果事件的字段边界。合成数据，不含任何凭据或密钥。",
+  "spec": "v1.1- §25.41（测试 T-224 至 T-227）； §25.46.10 新增 N-20 至 N-28（建号入口，测试 T-237 至 T-238）； §25.46.2 增加 page 字段、同一页面再次打开与绑定结论先于开页（N-31 至 N-38）； 增加查询未决时的互斥（N-39 至 N-41）； 增加已完成 reqId 集合的保留（N-42）",
+  "generator": "gen-native-open-vectors.mjs",
+  "names": {
+    "importPage": "nativeImportOpen（ 已移除：unknown_command；原私钥或助记词手输页不再存在）",
+    "recoveryPage": "nativeRecoveryOpen（恢复码，路径 A；账号名加密码，路径 B）",
+    "accountPage": "nativeAccountCreateOpen（G0 建号，§25.46）",
+    "aliases": "无（recoveryCreateOpen 不是其别名，§25.46.2）"
+  },
+  "accountGate": "nativeAccountCreateOpen：宿主未注册先判，任何状态为 not_supported；已注册时 G1、G2 为 not_available（不调用宿主）；G0 先做绑定查询（查询先于开页），已绑定或查询失败为 ok page none 并经 nativeAccountCreateResult 送结果；确认无绑定时宿主拒绝为 not_available，宿主开页为 ok page opened。不返回 no_key 或 not_ready。",
+  "accountAckPage": {
+    "opened": "本命令已使页面处于第一屏（ok 且 page opened）",
+    "none": "本命令未开页（ok 且 page none），结果经 nativeAccountCreateResult 送出"
+  },
+  "accountSecondOpen": "页面已开且该页无最终结果：不同 reqId 为 not_available；同一 reqId 为 ok page opened 且不重显；reqId 已有最终结果或页面已关闭后为 not_available；页面关闭后清空记录（d2d85f6 F-1）。另一 reqId 的绑定查询未决（含同一 reqId 再次送达）：not_available，不另起查询（M-1）。",
+  "hostStates": {
+    "absent": "宿主未注册：not_supported，不返回 ok",
+    "refuse": "宿主已注册但此刻不能打开：not_available",
+    "open": "宿主已打开：ack ok"
+  },
+  "ackErrorCodes": [
+    "bad_request",
+    "key_over_bridge_refused",
+    "not_supported",
+    "not_available"
+  ],
+  "credentialFields": [
+    "privateKeyHex",
+    "privateKeyArmored",
+    "pgpPrivateKeyArmored",
+    "pgpPassphrase",
+    "walletPrivateKey",
+    "mnemonic",
+    "recoveryCode",
+    "pin",
+    "password",
+    "accountPassword"
+  ],
+  "cases": [
+    {
+      "id": "N-01",
+      "group": "A",
+      "title": "导入页命令已移除（41(1)）：nativeImportOpen 答 unknown_command，不开页，不读载荷",
+      "testIds": [
+        "T-224",
+        "T-226"
+      ],
+      "env": {
+        "importHost": "open"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeImportOpen",
+            "reqId": "N-01"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-01",
+              "ok": false,
+              "error": "unknown_command"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-02",
+      "group": "A",
+      "title": "恢复页：宿主打开页面，ack ok，结果随后经 nativeRecoveryResult 送达",
+      "testIds": [
+        "T-224",
+        "T-226"
+      ],
+      "env": {
+        "recoveryHost": "open"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeRecoveryOpen",
+            "reqId": "N-02"
+          }
+        },
+        {
+          "op": "recoveryResult",
+          "reqId": "N-02",
+          "code": "ok",
+          "eoa": "0x9858effd232b4033e47d90003d41ec34ecaeda94"
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-02",
+              "ok": true
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "nativeRecoveryResult",
+              "reqId": "N-02",
+              "code": "ok",
+              "eoa": "0x9858effd232b4033e47d90003d41ec34ecaeda94"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-03",
+      "group": "A",
+      "title": "别名负例：导入页宿主已打开时，nativeRecoveryOpen 不得打开导入页（恢复页未实现：not_supported）",
+      "testIds": [
+        "T-224"
+      ],
+      "env": {
+        "importHost": "open",
+        "recoveryHost": "absent"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeRecoveryOpen",
+            "reqId": "N-03"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-03",
+              "ok": false,
+              "error": "not_supported"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-04",
+      "group": "A",
+      "title": "别名负例：nativeImportOpen 已移除，不是别名；恢复页宿主已打开时也不得打开恢复页：unknown_command",
+      "testIds": [
+        "T-224"
+      ],
+      "env": {
+        "importHost": "absent",
+        "recoveryHost": "open"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeImportOpen",
+            "reqId": "N-04"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-04",
+              "ok": false,
+              "error": "unknown_command"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-05",
+      "group": "B",
+      "title": "导入页命令已移除：nativeImportOpen 答 unknown_command，与已有钥无关",
+      "testIds": [
+        "T-225"
+      ],
+      "env": {
+        "importHost": "refuse"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeImportOpen",
+            "reqId": "N-05"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-05",
+              "ok": false,
+              "error": "unknown_command"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-06",
+      "group": "B",
+      "title": "导入页命令已移除：宿主状态不影响结果，nativeImportOpen 答 unknown_command，不返回 ok",
+      "testIds": [
+        "T-227"
+      ],
+      "env": {
+        "importHost": "absent"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeImportOpen",
+            "reqId": "N-06"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-06",
+              "ok": false,
+              "error": "unknown_command"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-07",
+      "group": "B",
+      "title": "恢复页：宿主未注册（absent）：not_supported（修正 Android 现行 unknown_command、iOS 现行静默 ok）",
+      "testIds": [
+        "T-227"
+      ],
+      "env": {
+        "recoveryHost": "absent"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeRecoveryOpen",
+            "reqId": "N-07"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-07",
+              "ok": false,
+              "error": "not_supported"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-08",
+      "group": "B",
+      "title": "恢复页：宿主不打开（refuse）：not_available",
+      "testIds": [
+        "T-225"
+      ],
+      "env": {
+        "recoveryHost": "refuse"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeRecoveryOpen",
+            "reqId": "N-08"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-08",
+              "ok": false,
+              "error": "not_available"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-09",
+      "group": "B",
+      "title": "Android 壳：恢复页宿主未注册时，应答 not_supported（不是 unknown_command）",
+      "testIds": [
+        "T-227"
+      ],
+      "env": {
+        "platform": "android",
+        "recoveryHost": "absent"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeRecoveryOpen",
+            "reqId": "N-09"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesandroid",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-09",
+              "ok": false,
+              "error": "not_supported"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-10",
+      "group": "B",
+      "title": "G0（无钥）下：nativeImportOpen 为 unknown_command；nativeRecoveryOpen 不返回 no_key 或 not_ready",
+      "testIds": [
+        "T-225"
+      ],
+      "env": {
+        "importHost": "open",
+        "recoveryHost": "open"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeImportOpen",
+            "reqId": "N-10a"
+          }
+        },
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeRecoveryOpen",
+            "reqId": "N-10b"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-10a",
+              "ok": false,
+              "error": "unknown_command"
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-10b",
+              "ok": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-11",
+      "group": "C",
+      "title": "携带 mode 字段的 nativeImportOpen：unknown_command（命令已移除，载荷不读取）",
+      "testIds": [
+        "T-225"
+      ],
+      "env": {
+        "importHost": "open"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeImportOpen",
+            "reqId": "N-11",
+            "mode": "mnemonic"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-11",
+              "ok": false,
+              "error": "unknown_command"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-12",
+      "group": "C",
+      "title": "携带 privateKeyHex 的 nativeImportOpen：unknown_command，不回显值",
+      "testIds": [
+        "T-225"
+      ],
+      "env": {
+        "importHost": "open"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeImportOpen",
+            "reqId": "N-12",
+            "privateKeyHex": "0x1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-12",
+              "ok": false,
+              "error": "unknown_command"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-13",
+      "group": "C",
+      "title": "恢复页携带 recoveryCode：key_over_bridge_refused（凭据不经 WebView）",
+      "testIds": [
+        "T-226"
+      ],
+      "env": {
+        "recoveryHost": "open"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeRecoveryOpen",
+            "reqId": "N-13",
+            "recoveryCode": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-13",
+              "ok": false,
+              "error": "key_over_bridge_refused"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-14",
+      "group": "C",
+      "title": "恢复页携带 password（路径 B 的口令）：key_over_bridge_refused",
+      "testIds": [
+        "T-226"
+      ],
+      "env": {
+        "recoveryHost": "open"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeRecoveryOpen",
+            "reqId": "N-14",
+            "password": "x"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-14",
+              "ok": false,
+              "error": "key_over_bridge_refused"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-15",
+      "group": "C",
+      "title": "reqId 为对象：bad_request，reqId 为 null",
+      "testIds": [
+        "T-225"
+      ],
+      "env": {
+        "recoveryHost": "open"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeRecoveryOpen",
+            "reqId": {
+              "x": 1
+            }
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": null,
+              "ok": false,
+              "error": "bad_request"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-16",
+      "group": "D",
+      "title": "恢复页取消：结果 cancelled，不带 eoa",
+      "testIds": [
+        "T-226"
+      ],
+      "env": {
+        "recoveryHost": "open"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeRecoveryOpen",
+            "reqId": "N-16"
+          }
+        },
+        {
+          "op": "recoveryResult",
+          "reqId": "N-16",
+          "code": "cancelled"
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-16",
+              "ok": true
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "nativeRecoveryResult",
+              "reqId": "N-16",
+              "code": "cancelled"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-17",
+      "group": "D",
+      "title": "恢复页退避：结果 backoff，带 cooldownSec，不带 eoa",
+      "testIds": [
+        "T-226"
+      ],
+      "env": {
+        "recoveryHost": "open"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeRecoveryOpen",
+            "reqId": "N-17"
+          }
+        },
+        {
+          "op": "recoveryResult",
+          "reqId": "N-17",
+          "code": "backoff",
+          "cooldownSec": 60
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-17",
+              "ok": true
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "nativeRecoveryResult",
+              "reqId": "N-17",
+              "code": "backoff",
+              "cooldownSec": 60
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-18",
+      "group": "D",
+      "title": "导入页命令已移除：无页，无结果事件",
+      "testIds": [
+        "T-226"
+      ],
+      "env": {
+        "importHost": "open"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeImportOpen",
+            "reqId": "N-18"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-18",
+              "ok": false,
+              "error": "unknown_command"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-19",
+      "group": "D",
+      "title": "恢复页结果不含凭据字段（逐项检查）",
+      "testIds": [
+        "T-226"
+      ],
+      "env": {
+        "recoveryHost": "open"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeRecoveryOpen",
+            "reqId": "N-19"
+          }
+        },
+        {
+          "op": "recoveryResult",
+          "reqId": "N-19",
+          "code": "ok",
+          "eoa": "0x9858effd232b4033e47d90003d41ec34ecaeda94"
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-19",
+              "ok": true
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "nativeRecoveryResult",
+              "reqId": "N-19",
+              "code": "ok",
+              "eoa": "0x9858effd232b4033e47d90003d41ec34ecaeda94"
+            }
+          }
+        }
+      ],
+      "forbiddenKeys": [
+        "recoveryCode",
+        "pin",
+        "password",
+        "accountPassword",
+        "mnemonic",
+        "privateKey",
+        "privateKeyHex",
+        "hash",
+        "ciphertext",
+        "encrypto"
+      ]
+    },
+    {
+      "id": "N-20",
+      "group": "E",
+      "title": "G0 建号：宿主打开页面，ack ok（不返回 no_key）",
+      "testIds": [
+        "T-237"
+      ],
+      "env": {
+        "accountHost": "open",
+        "keyState": "G0"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-20",
+            "account": "alice"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-20",
+              "ok": true,
+              "page": "opened"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-21",
+      "group": "E",
+      "title": "G0 建号：宿主未注册：not_supported，不返回 no_key（修正 Android 现行 no_key）",
+      "testIds": [
+        "T-237"
+      ],
+      "env": {
+        "accountHost": "absent",
+        "keyState": "G0"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-21",
+            "account": "alice"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-21",
+              "ok": false,
+              "error": "not_supported"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-22",
+      "group": "E",
+      "title": "G0 建号：宿主不打开（refuse）：not_available",
+      "testIds": [
+        "T-237"
+      ],
+      "env": {
+        "accountHost": "refuse",
+        "keyState": "G0"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-22",
+            "account": "alice"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-22",
+              "ok": false,
+              "error": "not_available"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-23",
+      "group": "E",
+      "title": "G1（有钥未 init）建号：not_available，不打开页面，不返回 not_ready",
+      "testIds": [
+        "T-237"
+      ],
+      "env": {
+        "accountHost": "open",
+        "keyState": "G1"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-23",
+            "account": "alice"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-23",
+              "ok": false,
+              "error": "not_available"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-24",
+      "group": "E",
+      "title": "G2（已 init）建号：not_available，不打开页面",
+      "testIds": [
+        "T-237"
+      ],
+      "env": {
+        "accountHost": "open",
+        "keyState": "G2"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-24",
+            "account": "alice"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-24",
+              "ok": false,
+              "error": "not_available"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-25",
+      "group": "E",
+      "title": "G1 建号且宿主未注册：not_supported（宿主判定先于门控）",
+      "testIds": [
+        "T-237"
+      ],
+      "env": {
+        "accountHost": "absent",
+        "keyState": "G1"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-25",
+            "account": "alice"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-25",
+              "ok": false,
+              "error": "not_supported"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-26",
+      "group": "E",
+      "title": "Android 壳 G0 建号宿主未注册：not_supported（通道为 cashtreesandroid）",
+      "testIds": [
+        "T-237"
+      ],
+      "env": {
+        "platform": "android",
+        "accountHost": "absent",
+        "keyState": "G0"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-26",
+            "account": "alice"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesandroid",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-26",
+              "ok": false,
+              "error": "not_supported"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-27",
+      "group": "E",
+      "title": "G0 建号携带 mode 字段：bad_request（建号页不接受入参以外的字段）",
+      "testIds": [
+        "T-238"
+      ],
+      "env": {
+        "accountHost": "open",
+        "keyState": "G0"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-27",
+            "mode": "create",
+            "account": "alice"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-27",
+              "ok": false,
+              "error": "bad_request"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-28",
+      "group": "E",
+      "title": "G0 建号携带 password 字段：key_over_bridge_refused，只记字段名",
+      "testIds": [
+        "T-238"
+      ],
+      "env": {
+        "accountHost": "open",
+        "keyState": "G0"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-28",
+            "password": "x",
+            "account": "alice"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-28",
+              "ok": false,
+              "error": "key_over_bridge_refused"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-29",
+      "group": "E",
+      "title": "G0 建号缺少 account：bad_request（§25.52Z.2，account 必填）",
+      "testIds": [
+        "T-237"
+      ],
+      "env": {
+        "accountHost": "open",
+        "keyState": "G0"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-29"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-29",
+              "ok": false,
+              "error": "bad_request"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-30",
+      "group": "E",
+      "title": "G0 建号 account 格式错误（0x 加 40 位但含大写）：bad_request（§25.52Z.2）",
+      "testIds": [
+        "T-237"
+      ],
+      "env": {
+        "accountHost": "open",
+        "keyState": "G0"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-30",
+            "account": "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-30",
+              "ok": false,
+              "error": "bad_request"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-31",
+      "group": "E",
+      "title": "页面已开时同一 reqId 再次送达：ack ok page opened，不再显示页面",
+      "testIds": [
+        "T-237"
+      ],
+      "env": {
+        "accountHost": "open",
+        "keyState": "G0"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-31",
+            "account": "alice"
+          }
+        },
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-31",
+            "account": "alice"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-31",
+              "ok": true,
+              "page": "opened"
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-31",
+              "ok": true,
+              "page": "opened"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-32",
+      "group": "E",
+      "title": "页面已开时不同 reqId 再次打开：not_available，不另开页，第一页不受影响",
+      "testIds": [
+        "T-237"
+      ],
+      "env": {
+        "accountHost": "open",
+        "keyState": "G0"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-32a",
+            "account": "alice"
+          }
+        },
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-32b",
+            "account": "bob"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-32a",
+              "ok": true,
+              "page": "opened"
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-32b",
+              "ok": false,
+              "error": "not_available"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-33",
+      "group": "E",
+      "title": "页面关闭且无结果：送 cancelled；之后同一 reqId 再次送达：not_available（不重开页）",
+      "testIds": [
+        "T-239",
+        "T-249"
+      ],
+      "env": {
+        "accountHost": "open",
+        "keyState": "G0"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-33",
+            "account": "alice"
+          }
+        },
+        {
+          "op": "pageClose",
+          "reqId": "N-33"
+        },
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-33",
+            "account": "alice"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-33",
+              "ok": true,
+              "page": "opened"
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "nativeAccountCreateResult",
+              "reqId": "N-33",
+              "ok": false,
+              "result": {
+                "code": "cancelled"
+              }
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-33",
+              "ok": false,
+              "error": "not_available"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-34",
+      "group": "E",
+      "title": "页面关闭后，新的 reqId 可以打开页面",
+      "testIds": [
+        "T-237"
+      ],
+      "env": {
+        "accountHost": "open",
+        "keyState": "G0"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-34a",
+            "account": "alice"
+          }
+        },
+        {
+          "op": "pageClose",
+          "reqId": "N-34a"
+        },
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-34b",
+            "account": "bob"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-34a",
+              "ok": true,
+              "page": "opened"
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "nativeAccountCreateResult",
+              "reqId": "N-34a",
+              "ok": false,
+              "result": {
+                "code": "cancelled"
+              }
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-34b",
+              "ok": true,
+              "page": "opened"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-35",
+      "group": "E",
+      "title": "查询结论为已绑定（already_bound）：ack ok page none，不开页，结果 already_bound，不含 eoa",
+      "testIds": [
+        "T-237",
+        "T-249"
+      ],
+      "env": {
+        "accountHost": "open",
+        "keyState": "G0",
+        "binding": "already_bound"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-35",
+            "account": "alice"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-35",
+              "ok": true,
+              "page": "none"
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "nativeAccountCreateResult",
+              "reqId": "N-35",
+              "ok": false,
+              "result": {
+                "code": "already_bound"
+              }
+            }
+          }
+        }
+      ],
+      "forbiddenKeys": [
+        "eoa"
+      ]
+    },
+    {
+      "id": "N-36",
+      "group": "E",
+      "title": "查询失败（lookup_unavailable）：ack ok page none，不开页，结果 lookup_unavailable，不含 eoa",
+      "testIds": [
+        "T-237",
+        "T-249"
+      ],
+      "env": {
+        "accountHost": "open",
+        "keyState": "G0",
+        "binding": "lookup_unavailable"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-36",
+            "account": "alice"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-36",
+              "ok": true,
+              "page": "none"
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "nativeAccountCreateResult",
+              "reqId": "N-36",
+              "ok": false,
+              "result": {
+                "code": "lookup_unavailable"
+              }
+            }
+          }
+        }
+      ],
+      "forbiddenKeys": [
+        "eoa"
+      ]
+    },
+    {
+      "id": "N-37",
+      "group": "E",
+      "title": "已绑定时宿主拒绝开页（refuse）：仍 ack ok page none，结果 already_bound（查询结论先于开页，宿主不参与）",
+      "testIds": [
+        "T-237",
+        "T-249"
+      ],
+      "env": {
+        "accountHost": "refuse",
+        "keyState": "G0",
+        "binding": "already_bound"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-37",
+            "account": "alice"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-37",
+              "ok": true,
+              "page": "none"
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "nativeAccountCreateResult",
+              "reqId": "N-37",
+              "ok": false,
+              "result": {
+                "code": "already_bound"
+              }
+            }
+          }
+        }
+      ],
+      "forbiddenKeys": [
+        "eoa"
+      ]
+    },
+    {
+      "id": "N-38",
+      "group": "E",
+      "title": "建号 ok 结束页面；同一 reqId 再次送达：not_available（不重开页，不送结果）",
+      "testIds": [
+        "T-237",
+        "T-249"
+      ],
+      "env": {
+        "accountHost": "open",
+        "keyState": "G0"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-38",
+            "account": "alice"
+          }
+        },
+        {
+          "op": "accountResult",
+          "reqId": "N-38",
+          "code": "ok",
+          "eoa": "0x9858effd232b4033e47d90003d41ec34ecaeda94"
+        },
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-38",
+            "account": "alice"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-38",
+              "ok": true,
+              "page": "opened"
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "nativeAccountCreateResult",
+              "reqId": "N-38",
+              "ok": true,
+              "result": {
+                "code": "ok",
+                "eoa": "0x9858effd232b4033e47d90003d41ec34ecaeda94",
+                "cleanupPending": false
+              }
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-38",
+              "ok": false,
+              "error": "not_available"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-39",
+      "group": "E",
+      "title": "（M-1）：另一 reqId 的查询未决时，不同 reqId 应答 not_available；未决的查询随后确认无绑定，开第一屏",
+      "testIds": [
+        "T-237"
+      ],
+      "env": {
+        "accountHost": "open",
+        "keyState": "G0"
+      },
+      "steps": [
+        {
+          "op": "queryStart",
+          "reqId": "N-39a"
+        },
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-39b",
+            "account": "bob"
+          }
+        },
+        {
+          "op": "queryAnswer",
+          "reqId": "N-39a",
+          "binding": "none"
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-39b",
+              "ok": false,
+              "error": "not_available"
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-39a",
+              "ok": true,
+              "page": "opened"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-40",
+      "group": "E",
+      "title": "查询未决中的 reqId 得到已绑定：ack ok page none，结果 already_bound，不含 eoa；之后新的 reqId 可以开页",
+      "testIds": [
+        "T-237",
+        "T-249"
+      ],
+      "env": {
+        "accountHost": "open",
+        "keyState": "G0"
+      },
+      "steps": [
+        {
+          "op": "queryStart",
+          "reqId": "N-40a"
+        },
+        {
+          "op": "queryAnswer",
+          "reqId": "N-40a",
+          "binding": "already_bound"
+        },
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-40b",
+            "account": "bob"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-40a",
+              "ok": true,
+              "page": "none"
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "nativeAccountCreateResult",
+              "reqId": "N-40a",
+              "ok": false,
+              "result": {
+                "code": "already_bound"
+              }
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-40b",
+              "ok": true,
+              "page": "opened"
+            }
+          }
+        }
+      ],
+      "forbiddenKeys": [
+        "eoa"
+      ]
+    },
+    {
+      "id": "N-41",
+      "group": "E",
+      "title": "查询未决时同一 reqId 再次送达：not_available，不另起查询，不开页",
+      "testIds": [
+        "T-237"
+      ],
+      "env": {
+        "accountHost": "open",
+        "keyState": "G0"
+      },
+      "steps": [
+        {
+          "op": "queryStart",
+          "reqId": "N-41"
+        },
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-41",
+            "account": "alice"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-41",
+              "ok": false,
+              "error": "not_available"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "N-42",
+      "group": "E",
+      "title": "（iOS 问询）：已完成的 reqId 集合不随新页打开而清空：较早完成的 reqId 再次送达仍为 not_available（不因另一页的打开而重新获准）",
+      "testIds": [
+        "T-237",
+        "T-249"
+      ],
+      "env": {
+        "accountHost": "open",
+        "keyState": "G0"
+      },
+      "steps": [
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-42a",
+            "account": "alice"
+          }
+        },
+        {
+          "op": "accountResult",
+          "reqId": "N-42a",
+          "code": "ok",
+          "eoa": "0x9858effd232b4033e47d90003d41ec34ecaeda94"
+        },
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-42b",
+            "account": "bob"
+          }
+        },
+        {
+          "op": "pageClose",
+          "reqId": "N-42b"
+        },
+        {
+          "op": "open",
+          "req": {
+            "type": "nativeAccountCreateOpen",
+            "reqId": "N-42a",
+            "account": "alice"
+          }
+        }
+      ],
+      "expect": [
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-42a",
+              "ok": true,
+              "page": "opened"
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "nativeAccountCreateResult",
+              "reqId": "N-42a",
+              "ok": true,
+              "result": {
+                "code": "ok",
+                "eoa": "0x9858effd232b4033e47d90003d41ec34ecaeda94",
+                "cleanupPending": false
+              }
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-42b",
+              "ok": true,
+              "page": "opened"
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "nativeAccountCreateResult",
+              "reqId": "N-42b",
+              "ok": false,
+              "result": {
+                "code": "cancelled"
+              }
+            }
+          }
+        },
+        {
+          "channel": "cashtreesios",
+          "detail": {
+            "action": "chatModuleEvent",
+            "event": {
+              "type": "ack",
+              "reqId": "N-42a",
+              "ok": false,
+              "error": "not_available"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "counts": {
+    "cases": 42
+  },
+  "notCovered": [
+    "原生页内的凭据输入与校验（§25.25.2、§25.26.4e.3）：由原生页的测试覆盖，本向量只覆盖应答与事件。",
+    "恢复页与导入页的界面文案与布局：由 PWA 集成负责人与原生页的验收覆盖。",
+    "Passcode 锁定时的行为：本向量未覆盖，按 §25.41.3 照常执行。"
+  ]
+}

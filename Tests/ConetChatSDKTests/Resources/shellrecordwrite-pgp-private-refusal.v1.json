@@ -1,0 +1,50 @@
+{
+  "vectorSet": "shellRecordWrite-pgp-private-refusal",
+  "version": "v1",
+  "spec": "PROTOCOL-incoming-call-unlock-overlay-proposal-addendum-29-draft-v166-2026-11-21.md#186",
+  "status": "新文件（草案，v4 同批列入）；不改任何既有向量",
+  "cases": [
+    {
+      "id": "SWP-01-pgp-private-in-payload",
+      "state": { "origin": "trusted", "reqIdValid": true },
+      "command": "shellRecordWrite",
+      "input": { "type": "shellRecordWrite", "reqId": "r-0001", "record": { "profiles": [ { "keyID": "<lowercase EOA>", "pgpPrivateKeyArmored": "<PGP PRIVATE KEY BLOCK 占位>" } ] } },
+      "expect": { "type": "ack", "reqId": "r-0001", "ok": false, "error": "pgp_private_in_payload" },
+      "noEcho": true,
+      "noEchoNote": "应答中不得出现 record、profiles、pgpPrivateKeyArmored、任何字段值或 PGP 块内容；只给代码。"
+    },
+    {
+      "id": "SWP-02-pgp-private-header-only",
+      "state": { "origin": "trusted", "reqIdValid": true },
+      "command": "shellRecordWrite",
+      "input": { "type": "shellRecordWrite", "reqId": "r-0002", "record": { "note": "<任一字符串含 PGP 私钥头>" } },
+      "expect": { "type": "ack", "reqId": "r-0002", "ok": false, "error": "pgp_private_in_payload" },
+      "noEcho": true,
+      "noPathName": "头部命中不返回路径名（§25.52D.6）"
+    },
+    {
+      "id": "SWP-03-origin-refused-precedence",
+      "state": { "origin": "untrusted", "reqIdValid": true },
+      "command": "shellRecordWrite",
+      "input": { "type": "shellRecordWrite", "reqId": "r-0003", "record": { "pgpPrivateKeyArmored": "<占位>" } },
+      "expect": { "type": "ack", "reqId": "r-0003", "ok": false, "error": "origin_refused" },
+      "noEcho": true,
+      "note": "来源不符优先于载荷检查，只答一次 origin_refused（§25.52Y.44 第 4 项）。"
+    },
+    {
+      "id": "SWP-04-clean-write-control",
+      "state": { "origin": "trusted", "reqIdValid": true, "rev": 3 },
+      "command": "shellRecordWrite",
+      "input": { "type": "shellRecordWrite", "reqId": "r-0004", "record": { "profiles": [ { "keyID": "<lowercase EOA>" } ] }, "rev": 3 },
+      "expect": { "type": "ack", "reqId": "r-0004", "ok": true, "result": { "code": "ok", "rev": 4 } },
+      "note": "无私钥的合法写入对照。"
+    }
+  ],
+  "forbidden": [
+    "应答回显 record、profiles、字段名、字段值或 PGP 块内容",
+    "pgp_private_in_payload 答为 ok:true",
+    "pgp_private_in_payload 为 result 内的 code（须为信封级 ok:false）",
+    "头部命中时返回路径名"
+  ],
+  "placeholderNote": "向量中的 PGP 块与 EOA 均为占位，不含真实私钥（无秘密文件规则）。"
+}

@@ -1,0 +1,419 @@
+{
+  "file": "spec-59e-synthetic-vectors.v3.3.1-E9-add.json",
+  "scope": "startup-classification-halfwrite-ignorable-synthetic",
+  "status": "pending_review",
+  "extends": "spec-59e-errata-v3.3.1-E9.md (E9-1 .. E9-9); does not replace E1-E7.1 vectors except where stated in E9-7",
+  "decision_source": "决定",
+  "fixtures_note": "Synthetic only. No real mnemonic, key or account. Mnemonic-bearing locations: MNEM (wallet.mnem / mnemonic:<eoa>), REC.mnemonicPhrase, SDK-readable sealed or isolated copies. Digests are synthetic placeholders.",
+  "invariants": [
+    "E9-I1 启动分类不等待前滚、回滚或续做；窗口残留只保留，不删除。",
+    "E9-I2 只有助记词位置的读取失败计为 unknown；标记或记录的不一致本身不阻止判定。",
+    "E9-I3 任一位置读出有效助记词 → valid，接回；不进入 onboarding。",
+    "E9-I4 双端（或纯浏览器本地）确认无有效助记词 → onboarding；原数据全部保留，不删。",
+    "E9-I5 任一读取故障、用户解锁类锁定、PWA 结果未知 → unknown；保留，可重试，不进入 onboarding。"
+  ],
+  "cases": [
+    {
+      "id": "E9-01",
+      "title": "双端无 + 半写窗口（REC 部分写入、MNEM 未写、标记无 newRecordSha）→ onboarding，残留保留",
+      "policy": "decided_by_owner_2026-11-17",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "keystore_enumerate": "ok",
+          "wallet.rec": "NEW_REC_PARTIAL (mnemonicPhrase absent, readable)",
+          "wallet.mnem": "absent",
+          "isolated_pattern": {
+            "present": true,
+            "count": 1,
+            "carries_mnemonic": false
+          },
+          "intent_marker": "pending_no_newRecordSha",
+          "mnemonic_locations_read": "all_ok",
+          "mnemonic_locations_valid": 0
+        }
+      },
+      "op": {
+        "command": "startup_classify",
+        "pwa_preread_first": true
+      },
+      "expect": {
+        "classification": "confirmed_no_valid_mnemonic",
+        "answer_to_startup": "onboarding",
+        "window_recovery_run_before_classification": false,
+        "deleted": [],
+        "files": {
+          "wallet.rec": "NEW_REC_PARTIAL",
+          "isolated_pattern": {
+            "count": 1,
+            "present": true
+          },
+          "intent_marker": "retained"
+        },
+        "audit_append": []
+      },
+      "source": "E9-1 第 3 项；E9-2 N1、N2′、N4；E9-5"
+    },
+    {
+      "id": "E9-02",
+      "title": "双端无 + 旧意图标记（标记存在、记录缺失 record_missing；助记词位置全部可读且为空）→ onboarding",
+      "policy": "decided_by_owner_2026-11-17",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "keystore_enumerate": "ok",
+          "wallet.rec": "absent",
+          "wallet.mnem": "absent",
+          "intent_marker": "present_stale",
+          "storage_state": "Locked(record_missing)",
+          "mnemonic_locations_read": "all_ok",
+          "mnemonic_locations_valid": 0
+        }
+      },
+      "op": {
+        "command": "startup_classify",
+        "pwa_preread_first": true
+      },
+      "expect": {
+        "classification": "confirmed_no_valid_mnemonic",
+        "answer_to_startup": "onboarding",
+        "storage_derived_lock_blocks_classification": false,
+        "deleted": [],
+        "files": {
+          "intent_marker": "retained"
+        }
+      },
+      "source": "E9-1 第 3 项；E9-2 N3′；Y.83 第 2 项不适用于启动分类"
+    },
+    {
+      "id": "E9-03",
+      "title": "双端无 + 标记缺失（marker_missing）但 REC 可读且无助记词 → onboarding",
+      "policy": "decided_by_owner_2026-11-17",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "keystore_enumerate": "ok",
+          "wallet.rec": "EMPTY_MNEMONIC_REC (readable, mnemonicPhrase absent)",
+          "wallet.mnem": "absent",
+          "intent_marker": "absent",
+          "storage_state": "Locked(marker_missing)",
+          "mnemonic_locations_read": "all_ok",
+          "mnemonic_locations_valid": 0
+        }
+      },
+      "op": {
+        "command": "startup_classify",
+        "pwa_preread_first": true
+      },
+      "expect": {
+        "classification": "confirmed_no_valid_mnemonic",
+        "answer_to_startup": "onboarding",
+        "deleted": [],
+        "files": {
+          "wallet.rec": "EMPTY_MNEMONIC_REC"
+        }
+      },
+      "source": "E9-2 N3′、N4；E9-7 E7-3 表行“存储派生锁定”改写"
+    },
+    {
+      "id": "E9-04",
+      "title": "PWA 无 + 原生封存副本中有有效助记词 → valid，接回已有钱包",
+      "policy": "decided_by_owner_2026-11-17",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "keystore_enumerate": "ok",
+          "wallet.rec": "absent_or_partial",
+          "wallet.mnem": "absent",
+          "sealed_copy_MNEM": {
+            "carries_mnemonic": true,
+            "valid": true,
+            "eoa_matches_keyID": true
+          },
+          "intent_marker": "pending_no_newRecordSha",
+          "mnemonic_locations_read": "all_ok",
+          "mnemonic_locations_valid": 1
+        }
+      },
+      "op": {
+        "command": "startup_classify",
+        "pwa_preread_first": true
+      },
+      "expect": {
+        "classification": "valid",
+        "answer_to_startup": "reconnect_existing_wallet",
+        "restricted_return": "phrase_via_trusted_main_frame_only (E6)",
+        "deleted": [],
+        "onboarding_entered": false
+      },
+      "source": "E9-1 第 4 项；E9-3；E6"
+    },
+    {
+      "id": "E9-05",
+      "title": "PWA 有有效助记词 → 接回；不调用原生预读",
+      "policy": "decided_by_owner_2026-11-17",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": true,
+          "eoa_matches_keyID": true,
+          "read": "ok"
+        },
+        "native": {
+          "not_consulted": true
+        }
+      },
+      "op": {
+        "command": "startup_classify",
+        "pwa_preread_first": true
+      },
+      "expect": {
+        "classification": "valid_from_pwa",
+        "answer_to_startup": "enter_with_pwa_account",
+        "native_preread_calls": 0,
+        "deleted": []
+      },
+      "source": "E9-1 第 1 项"
+    },
+    {
+      "id": "E9-06",
+      "title": "PWA 结果未知 → 不发起原生预读，保留数据，可重试，不进入 onboarding",
+      "policy": "decided_by_owner_2026-11-17",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": null,
+          "read": "unknown"
+        },
+        "native": {
+          "not_consulted": true
+        }
+      },
+      "op": {
+        "command": "startup_classify",
+        "pwa_preread_first": true
+      },
+      "expect": {
+        "classification": "unknown",
+        "answer_to_startup": "retain_and_retry",
+        "native_preread_calls": 0,
+        "onboarding_entered": false,
+        "deleted": []
+      },
+      "source": "E9-1 第 5 项；E6 NE-03"
+    },
+    {
+      "id": "E9-07",
+      "title": "PWA 无 + 原生 REC 解密失败（aead_failed，助记词位置不可读）→ unknown，保留，不进入 onboarding",
+      "policy": "decided_by_owner_2026-11-17; T-E9-a pending",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "keystore_enumerate": "ok",
+          "wallet.rec": "PARTIAL_UNDECRYPTABLE (aead_failed)",
+          "wallet.mnem": "absent",
+          "intent_marker": "pending_no_newRecordSha",
+          "mnemonic_locations_read": "read_failed_at_REC",
+          "mnemonic_locations_valid": "unknown"
+        }
+      },
+      "op": {
+        "command": "startup_classify",
+        "pwa_preread_first": true
+      },
+      "expect": {
+        "classification": "unknown",
+        "answer_to_startup": "retain_and_retry",
+        "onboarding_entered": false,
+        "deleted": [],
+        "files": {
+          "wallet.rec": "PARTIAL_UNDECRYPTABLE"
+        }
+      },
+      "source": "E9-2 N2′（助记词位置读取失败）；待 T-E9-a 确认半写 REC 不可解密的边界"
+    },
+    {
+      "id": "E9-08",
+      "title": "PWA 无 + 未结算标记导致存储派生锁定，助记词位置全部可读且为空 → onboarding（E4/E7-3 原判 unknown 的情形改写）",
+      "policy": "decided_by_owner_2026-11-17; E4 walletStatus column pending T-E9-d",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "keystore_enumerate": "ok",
+          "wallet.rec": "OLD_REC_READABLE_NO_MNEMONIC",
+          "wallet.mnem": "absent",
+          "intent_marker": "pending_unsettled",
+          "storage_state": "Locked(marker_missing) derived from unsettled marker",
+          "mnemonic_locations_read": "all_ok",
+          "mnemonic_locations_valid": 0
+        }
+      },
+      "op": {
+        "command": "startup_classify",
+        "pwa_preread_first": true
+      },
+      "expect": {
+        "classification": "confirmed_no_valid_mnemonic",
+        "answer_to_startup": "onboarding",
+        "e4_walletStatus_gate_used_for_startup": false,
+        "deleted": [],
+        "files": {
+          "wallet.rec": "OLD_REC_READABLE_NO_MNEMONIC",
+          "intent_marker": "retained"
+        }
+      },
+      "source": "E9-2 N3′；E9-7 E4 与 E7-3 表行改写"
+    },
+    {
+      "id": "E9-09",
+      "title": "PWA 无 + 原生需要用户解锁（口令类锁定）→ unknown，保留，可重试",
+      "policy": "decided_by_owner_2026-11-17",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "keystore_enumerate": "locked_requires_user_unlock",
+          "mnemonic_locations_read": "not_read",
+          "intent_marker": "present"
+        }
+      },
+      "op": {
+        "command": "startup_classify",
+        "pwa_preread_first": true
+      },
+      "expect": {
+        "classification": "unknown",
+        "answer_to_startup": "retain_and_retry",
+        "onboarding_entered": false,
+        "deleted": []
+      },
+      "source": "E9-2 N3′（用户解锁类锁定仍为 unknown）；§25.52CO.4 口令锁定 locked 不改"
+    },
+    {
+      "id": "E9-10",
+      "title": "纯浏览器：本地确认无有效助记词 → onboarding（不调用原生）",
+      "policy": "decided_by_owner_2026-11-17",
+      "pre": {
+        "surface": "browser",
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "not_available": true
+        }
+      },
+      "op": {
+        "command": "startup_classify"
+      },
+      "expect": {
+        "classification": "confirmed_no_valid_mnemonic",
+        "answer_to_startup": "onboarding",
+        "native_consulted": false,
+        "deleted": []
+      },
+      "source": "E9-4；第八节"
+    },
+    {
+      "id": "E9-11",
+      "title": "纯浏览器：本地读取未知 → 保留，可重试，不进入 onboarding",
+      "policy": "decided_by_owner_2026-11-17",
+      "pre": {
+        "surface": "browser",
+        "pwa": {
+          "valid_mnemonic": null,
+          "read": "unknown"
+        },
+        "native": {
+          "not_available": true
+        }
+      },
+      "op": {
+        "command": "startup_classify"
+      },
+      "expect": {
+        "classification": "unknown",
+        "answer_to_startup": "retain_and_retry",
+        "onboarding_entered": false,
+        "deleted": []
+      },
+      "source": "E9-4"
+    },
+    {
+      "id": "E9-12",
+      "title": "综合：双端无；仅剩私钥与地址、半写残留、隔离副本无助记词、旧意图标记并存 → onboarding，全部保留",
+      "policy": "decided_by_owner_2026-11-17",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok",
+          "stored": [
+            "address_only"
+          ]
+        },
+        "native": {
+          "keystore_enumerate": "ok",
+          "wallet.rec": "KEY_ONLY_RECORD (no mnemonicPhrase)",
+          "wallet.mnem": "absent",
+          "isolated_pattern": {
+            "present": true,
+            "count": 2,
+            "carries_mnemonic": false
+          },
+          "sealed_copy_MARK": {
+            "carries_mnemonic": false
+          },
+          "intent_marker": "pending_no_newRecordSha (stale)",
+          "mnemonic_locations_read": "all_ok",
+          "mnemonic_locations_valid": 0
+        }
+      },
+      "op": {
+        "command": "startup_classify",
+        "pwa_preread_first": true
+      },
+      "expect": {
+        "classification": "confirmed_no_valid_mnemonic",
+        "answer_to_startup": "onboarding",
+        "window_recovery_run_before_classification": false,
+        "deleted": [],
+        "files": {
+          "isolated_pattern": {
+            "count": 2,
+            "present": true
+          },
+          "intent_marker": "retained"
+        }
+      },
+      "source": "E9-1 第 3 项；E9-2 全部；E7-3 表行“只剩私钥或钱包记录”（onboarding 保留数据）"
+    }
+  ],
+  "clauses_rewritten_by_E9": [
+    "E4 启动分类相关列（walletStatus 门槛，待 T-E9-d）",
+    "E7-3 N2（收窄为 N2′）、N3（改为 N3′）、表中未结算标记锁定一行",
+    "E7-4 存储派生锁定部分",
+    "§25.52Y.83 第 2 项：仅启动分类维度，族命令与写入不改",
+    "§四之二 窗口规则：不阻塞启动分类",
+    "WK-42 启动期望（待 T-E9-e）"
+  ],
+  "not_pinned": true,
+  "not_in_spec": true
+}

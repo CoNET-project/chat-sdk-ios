@@ -4,6 +4,29 @@ import WebKit
 import UIKit
 #endif
 
+/// The host page's navigation rule. The page is loaded once, from its own string, and that first main-frame load is the
+/// only navigation allowed. Links, redirects, subframes and new windows are cancelled. Pure, so the rule is unit-tested without WebKit.
+struct OpenPgpNavigationPolicy: Equatable {
+	/// Set right before the string load; the first main-frame decision clears it.
+	private(set) var initialLoadPending = false
+	/// Navigations cancelled so far (a count only, never a URL).
+	private(set) var cancelledCount = 0
+
+	mutating func armInitialLoad() {
+		initialLoadPending = true
+	}
+
+	/// true: allow the navigation. false: cancel it.
+	mutating func decide(isMainFrame: Bool) -> Bool {
+		if initialLoadPending && isMainFrame {
+			initialLoadPending = false
+			return true
+		}
+		cancelledCount += 1
+		return false
+	}
+}
+
 /// Ephemeral WKWebView that runs bundled `openpgp.min.js` + `ethers.umd.min.js`
 /// for killed-app voice offer fetch / decrypt / EIP-191 verify.
 public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
@@ -24,6 +47,14 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNaviga
 	private var ready = false
 	private var pending: [(Result<String, Error>) -> Void] = []
 	private var bootstrapped = false
+	/// True once a boot has been ready in this process: the first boot gets the longer timeout.
+	private var hasBeenReady = false
+	/// Automatic retries of a failed boot since the last ready (one retry, then the error).
+	private var bootRetries = 0
+	/// The page's navigation rule. Reset with each new page.
+	private var navigationPolicy = OpenPgpNavigationPolicy()
+	/// Navigations the rule has cancelled (diagnostics and tests).
+	var blockedNavigationCount: Int { navigationPolicy.cancelledCount }
 
 	private override init() {
 		super.init()
@@ -39,28 +70,112 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNaviga
 		#endif
 	}
 
+	#if BEAMIO_TEST_HOOKS
+	/// Test build only: the host reports not ready at once, as a host whose page cannot boot does (openpgp_not_ready).
+	static var testForceNotReady = false
+
+	/// Test build only: multiplies the boot timeouts. A suite that runs in many parallel simulator clones, each booting its own WKWebView, can take far longer
+	/// than the 8 s of the first boot; the product limits stay as they are.
+	static var testBootTimeoutScale: Double = 1
+
+	/// Test build only: the answer of `awaitHostReadyForTests`.
+	struct HostReadiness: Equatable {
+		let ready: Bool
+		/// Why it is not ready (empty when it is): the host did not boot within the limit, or it was forced not ready.
+		let reason: String
+	}
+
+	/// Test build only: waits until the page is ready (booting it if need be), for at most `timeoutSeconds`. A suite that depends on the host calls this first,
+	/// so that a host that cannot boot is reported as "host not ready", with the reason, and not as a failed verification (a nil from `verifyMessage`). Boot
+	/// retries and the longer boot limit are in effect while it waits.
+	func awaitHostReadyForTests(timeoutSeconds: TimeInterval = 90) async -> HostReadiness {
+		Self.testBootTimeoutScale = max(Self.testBootTimeoutScale, 4)
+		if Self.testForceNotReady { return HostReadiness(ready: false, reason: "forced not ready (testForceNotReady)") }
+		let deadline = Date().addingTimeInterval(timeoutSeconds)
+		var attempts = 0
+		while Date() < deadline {
+			attempts += 1
+			let ok: Bool = await withCheckedContinuation { continuation in self.ensureReady { continuation.resume(returning: $0) } }
+			if ok { return HostReadiness(ready: true, reason: "") }
+			try? await Task.sleep(nanoseconds: 200_000_000)
+		}
+		return HostReadiness(ready: false, reason: "the page did not signal ready within \(Int(timeoutSeconds)) s (\(attempts) boot attempts)")
+	}
+	#endif
+
+	// MARK: - Failure class and prewarm (inbound offer verification; project owner's requirement)
+
+	/// Whether `error`, the failure of a host call, says that the host was unavailable and a second try can help: the page did not boot in time (-1) or was stuck
+	/// (-7). A teardown (-8: a logout, an account switch, a lock: the account is changing) is not, and neither is any other error (a signature that does not
+	/// verify, a script error, a malformed input). A caller retries only when this is true, once, and only within its own time limits.
+	public static func isHostUnavailable(_ error: Error) -> Bool {
+		let ns = error as NSError
+		return ns.domain == "BeamioOpenPgp" && (ns.code == -1 || ns.code == -7)
+	}
+
+	/// The diagnostic line of a failed verification, for a caller that retries: the error domain and code, the time it took, and whether this was the retry. No
+	/// text, signature, address or call id is in it.
+	public static func verifyFailureDiagnostic(_ error: Error, elapsedMs: Int, retried: Bool) -> String {
+		let ns = error as NSError
+		return "domain=\(ns.domain) code=\(ns.code) ms=\(elapsedMs) retried=\(retried)"
+	}
+
+	/// Boots the page now, if it is not up, so that the first call after the app starts or wakes does not wait for a cold boot: call it at the first moment of a
+	/// start and of a VoIP wake. It changes no rule of any check. It does nothing in a test build unless `testPrewarmEnabled` is set (the unit tests of other
+	/// areas must not boot a WebView as a side effect of a command).
+	public func prewarm() {
+		#if BEAMIO_TEST_HOOKS
+		guard Self.testPrewarmEnabled else { return }
+		#endif
+		ensureReady { _ in }
+	}
+
+	#if BEAMIO_TEST_HOOKS
+	/// Test build only: lets `prewarm` boot the page.
+	static var testPrewarmEnabled = false
+	#endif
+
 	public func ensureReady(completion: @escaping (Bool) -> Void) {
+		ensureReadyResult { completion((try? $0.get()) != nil) }
+	}
+
+	/// Like `ensureReady`, but a failure carries its error: a boot timeout (-1), a teardown (-8), missing scripts (-2). A caller that must tell an
+	/// unavailable host (retry can help) from an account change (it cannot) needs the code, so a runJs call returns it instead of a bare "not ready".
+	/// A host that is not ready for no recorded reason (the test switch) answers -3.
+	func ensureReadyResult(completion: @escaping (Result<Void, Error>) -> Void) {
 		// WKWebView / evaluateJavaScript are main-thread-only. Callers (e.g.
 		// history keccak on a utility queue) must never complete onto a bg thread
 		// and then call into WebKit — that triggers an intentional EXC_BREAKPOINT.
-		let finish: (Bool) -> Void = { ok in
+		let notReady = Result<Void, Error>.failure(NSError(domain: "BeamioOpenPgp", code: -3, userInfo: [
+			NSLocalizedDescriptionKey: "openpgp host not ready",
+		]))
+		let finish: (Result<Void, Error>) -> Void = { result in
 			if Thread.isMainThread {
-				completion(ok)
+				completion(result)
 			} else {
-				DispatchQueue.main.async { completion(ok) }
+				DispatchQueue.main.async { completion(result) }
 			}
 		}
+		#if BEAMIO_TEST_HOOKS
+		if Self.testForceNotReady {
+			finish(notReady)
+			return
+		}
+		#endif
 		if ready {
-			finish(true)
+			finish(.success(()))
 			return
 		}
 		DispatchQueue.main.async {
 			if self.ready {
-				completion(true)
+				completion(.success(()))
 				return
 			}
 			self.pending.append { result in
-				completion((try? result.get()) != nil || self.ready)
+				switch result {
+				case .success: completion(.success(()))
+				case .failure(let error): completion(self.ready ? .success(()) : .failure(error))
+				}
 			}
 			// Starts the page (and its one boot timer) unless it is already booting.
 			self.bootstrapIfNeeded()
@@ -70,11 +185,29 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNaviga
 	/// Main thread. One timer per boot: the page never signalled ready.
 	private func armBootTimer() {
 		let generation = self.generation
-		let limit = Self.bootTimeout(foreground: Self.appIsActive())
+		var limit = hasBeenReady ? Self.bootTimeout(foreground: Self.appIsActive()) : Self.firstBootTimeout
+		#if BEAMIO_TEST_HOOKS
+		limit *= Self.testBootTimeoutScale
+		#endif
+		#if BEAMIO_TEST_HOOKS
+		let forcedFailure = self.isTestHost && Self.testBootFailuresRemaining > 0
+		if forcedFailure { Self.testBootFailuresRemaining -= 1 }
+		let fireAfter: TimeInterval = forcedFailure ? 0.01 : limit
+		#else
+		let fireAfter: TimeInterval = limit
+		#endif
 		// The host is a process-wide singleton: a strong capture leaks nothing.
-		DispatchQueue.main.asyncAfter(deadline: .now() + limit) {
+		DispatchQueue.main.asyncAfter(deadline: .now() + fireAfter) {
 			guard !self.ready, generation == self.generation else { return }
 			Self.diag(String(format: "boot timeout after %ld ms app=%@", Int(limit * 1000), Self.appStateLabel()))
+			// one automatic retry of a failed boot. The waiting calls stay queued; only the second failure answers them.
+			if self.bootRetries < 1 {
+				self.bootRetries += 1
+				Self.diag("boot retry after a timeout (one automatic retry)")
+				self.resetHost(reason: "boot timeout, retry")
+				return
+			}
+			self.bootRetries = 0
 			self.flushPending(.failure(NSError(domain: "BeamioOpenPgp", code: -1, userInfo: [
 				NSLocalizedDescriptionKey: "openpgp host timeout",
 			])))
@@ -175,21 +308,6 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNaviga
 		)
 	}
 
-	/// Decrypt armored ciphertext with recipient user PGP private key.
-	public func decrypt(armor: String, privateKeyArmor: String, completion: @escaping (Result<String, Error>) -> Void) {
-		runJs(
-			"""
-			(async () => {
-			  const sk = await openpgp.readPrivateKey({ armoredKey: \(jsString(privateKeyArmor)) });
-			  const message = await openpgp.readMessage({ armoredMessage: \(jsString(armor)) });
-			  const { data } = await openpgp.decrypt({ message, decryptionKeys: sk, format: 'utf8' });
-			  return typeof data === 'string' ? data : String(data);
-			})()
-			""",
-			work: .crypto(bytes: armor.utf8.count),
-			completion: completion
-		)
-	}
 
 	/// EIP-191 `verifyMessage(text, signature)` → recovered address (checksummed).
 	public func verifyMessage(text: String, signature: String, completion: @escaping (Result<String, Error>) -> Void) {
@@ -205,72 +323,8 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNaviga
 		)
 	}
 
-	// MARK: - Local wallet signer (key from BeamioChatWalletKeychain; never logged)
-
-	/// EIP-191 `personal_sign` of `message` with `privateKeyHex`.
-	public func signEip191(privateKeyHex: String, message: String, completion: @escaping (Result<String, Error>) -> Void) {
-		runJs(
-			"""
-			(async () => {
-			  const w = new ethers.Wallet('0x' + \(jsString(privateKeyHex)));
-			  return await w.signMessage(\(jsString(message)));
-			})()
-			""",
-			work: .quick,
-			completion: { completion(Self.signatureOrError($0)) }
-		)
-	}
-
-	/// EIP-712 signature of `{ domain, types, primaryType, message|value }`.
-	public func signEip712(privateKeyHex: String, typedData: [String: Any], completion: @escaping (Result<String, Error>) -> Void) {
-		guard let data = try? JSONSerialization.data(withJSONObject: typedData),
-		      let json = String(data: data, encoding: .utf8)
-		else {
-			completion(.failure(Self.localSignError))
-			return
-		}
-		runJs(
-			"""
-			(async () => {
-			  const td = JSON.parse(\(jsString(json)));
-			  const types = Object.assign({}, td.types || {});
-			  delete types.EIP712Domain;
-			  const value = td.value || td.message;
-			  if (!td.domain || !value) throw new Error('bad_typed_data');
-			  const w = new ethers.Wallet('0x' + \(jsString(privateKeyHex)));
-			  return await w.signTypedData(td.domain, types, value);
-			})()
-			""",
-			work: .quick,
-			completion: { completion(Self.signatureOrError($0)) }
-		)
-	}
-
-	/// Lower-case address of `privateKeyHex`.
-	public func walletAddress(privateKeyHex: String, completion: @escaping (Result<String, Error>) -> Void) {
-		runJs(
-			"""
-			(async () => {
-			  return String(new ethers.Wallet('0x' + \(jsString(privateKeyHex))).address).toLowerCase();
-			})()
-			""",
-			work: .quick,
-			completion: { result in
-				if case .success(let a) = result, a.hasPrefix("0x") { completion(.success(a)) }
-				else { completion(.failure(Self.localSignError)) }
-			}
-		)
-	}
-
-	private static let localSignError = NSError(domain: "BeamioOpenPgp", code: -10, userInfo: [
-		NSLocalizedDescriptionKey: "local_sign_failed",
-	])
-
-	/// Never pass the JS error text on: it could quote its input.
-	private static func signatureOrError(_ result: Result<String, Error>) -> Result<String, Error> {
-		if case .success(let sig) = result, sig.hasPrefix("0x") { return .success(sig) }
-		return .failure(localSignError)
-	}
+	// S-4: no signing key is ever passed into this WebView. Signing stays in native code (BeamioNativeWallet /
+	// BeamioNativeEthSigner); this host only handles public keys, ciphertext and verification.
 
 	/// 1B: PWA already signed `message`; encrypt `{message,signMessage}` base64 → route PGP.
 	public func encryptSignedRouteCommand(
@@ -320,20 +374,31 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNaviga
 		)
 	}
 
-	/// Wrap inner OpenPGP armor to entry route key (SI peel). Returns inner on same-node / failure.
+	/// Wrap inner OpenPGP armor to the entry route key (SI peel). Success is the wrapped armor. The inner armor comes back
+	/// unchanged only when no outer layer is needed (the entry is the inner recipient's own node, or the inner message
+	/// names no key ID). Every other case is a failure: the inner armor is never returned in place of a failed wrap.
 	public func wrapArmorToEntryRoute(
 		innerArmor: String,
 		entryRoutePublicArmor: String,
 		completion: @escaping (Result<String, Error>) -> Void
 	) {
-		if !innerArmor.contains("BEGIN PGP MESSAGE") || entryRoutePublicArmor.isEmpty {
-			completion(.success(innerArmor))
+		// No silent fallback: a wrap that cannot be made is a failure, and the caller skips that entry.
+		// It never hands back the inner armor in place of the wrap.
+		guard innerArmor.contains("BEGIN PGP MESSAGE") else {
+			completion(.failure(NSError(domain: "BeamioOpenPgp", code: -5, userInfo: [
+				NSLocalizedDescriptionKey: "wrap_not_armor",
+			])))
+			return
+		}
+		guard entryRoutePublicArmor.contains("BEGIN PGP PUBLIC KEY") else {
+			completion(.failure(NSError(domain: "BeamioOpenPgp", code: -5, userInfo: [
+				NSLocalizedDescriptionKey: "wrap_no_entry_key",
+			])))
 			return
 		}
 		runJs(
 			"""
 			(async () => {
-			  try {
 			    const innerArmor = \(jsString(innerArmor));
 			    const entryArmor = \(jsString(entryRoutePublicArmor));
 			    const entryKey = await openpgp.readKey({ armoredKey: entryArmor });
@@ -348,10 +413,8 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNaviga
 			      config: { preferredCompressionAlgorithm: openpgp.enums.compression.zlib },
 			    });
 			    const out = typeof encrypted === 'string' ? encrypted : String(encrypted);
-			    return out.includes('BEGIN PGP MESSAGE') ? out : innerArmor;
-			  } catch (e) {
-			    return \(jsString(innerArmor));
-			  }
+			    if (!out.includes('BEGIN PGP MESSAGE')) throw new Error('wrap_not_armor');
+			    return out;
 			})()
 			""",
 			work: .crypto(bytes: innerArmor.utf8.count),
@@ -359,44 +422,6 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNaviga
 		)
 	}
 
-	/// Decrypt inbound user-PGP armor → UTF-8; also returns keccak256(utf8(armor)) for ACK.
-	public func decryptInboundArmor(
-		privateKeyArmor: String,
-		armor: String,
-		completion: @escaping (Result<(text: String, armorHash: String), Error>) -> Void
-	) {
-		runJs(
-			"""
-			(async () => {
-			  const armor = \(jsString(armor));
-			  const sk = await openpgp.readPrivateKey({ armoredKey: \(jsString(privateKeyArmor)) });
-			  const message = await openpgp.readMessage({ armoredMessage: armor });
-			  const { data } = await openpgp.decrypt({ message, decryptionKeys: sk, format: 'utf8' });
-			  const text = typeof data === 'string' ? data : String(data);
-			  const hash = ethers.keccak256(ethers.toUtf8Bytes(armor));
-			  return JSON.stringify({ text, armorHash: hash });
-			})()
-			""",
-			work: .crypto(bytes: armor.utf8.count)
-		) { result in
-			switch result {
-			case .failure(let err):
-				completion(.failure(err))
-			case .success(let raw):
-				guard let data = raw.data(using: .utf8),
-				      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-				      let text = obj["text"] as? String,
-				      let hash = obj["armorHash"] as? String
-				else {
-					completion(.failure(NSError(domain: "BeamioOpenPgp", code: -5, userInfo: [
-						NSLocalizedDescriptionKey: "decryptInbound parse",
-					])))
-					return
-				}
-				completion(.success((text: text, armorHash: hash)))
-			}
-		}
-	}
 
 	/// keccak256(utf8(s)) via ethers in the OpenPGP host.
 	func keccakUtf8(_ text: String, completion: @escaping (Result<String, Error>) -> Void) {
@@ -464,13 +489,109 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNaviga
 		      let body = message.body as? [String: Any],
 		      let action = body["action"] as? String
 		else { return }
+		// A message from a page that was reset (an earlier boot) must not mark the current page ready (retry).
+		if let from = message.webView, from !== webView { return }
 		if action == "ready" {
 			ready = true
+			hasBeenReady = true
+			bootRetries = 0
 			flushPending(.success("ready"))
 			Self.diag(String(format: "host ready ms=%ld app=%@", Int((bootStartedAt.map { Date().timeIntervalSince($0) } ?? 0) * 1000),
 				Self.appStateLabel())
 			)
+		} else if action == "csp" || action == "error" {
+			// H1: only a fixed vocabulary reaches the log, never a message (a parse error message can carry a slice of
+			// the plaintext or the armor).
+			Self.diag("page \(action): \(Self.diagnosticDetail(action: action, body: body))")
 		}
+	}
+
+	// MARK: - Navigation
+
+	/// Only the first main-frame load of the page is allowed (see `OpenPgpNavigationPolicy`). Only counts are logged, never a URL.
+	public func webView(
+		_ webView: WKWebView,
+		decidePolicyFor navigationAction: WKNavigationAction,
+		decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+	) {
+		let isCurrentMainFrame = webView === self.webView && (navigationAction.targetFrame?.isMainFrame ?? false)
+		let allowed = navigationPolicy.decide(isMainFrame: isCurrentMainFrame)
+		if !allowed {
+			Self.diag("navigation cancelled #\(navigationPolicy.cancelledCount)")
+		}
+		decisionHandler(allowed ? .allow : .cancel)
+	}
+
+	/// The only page-side text that reaches the log (H1). A CSP directive name made of a–z and hyphens, up to 32 characters, or an error
+	/// class name from a fixed list. Anything else is `other`.
+	static func diagnosticDetail(action: String, body: [String: Any]) -> String {
+		switch action {
+		case "csp":
+			let raw = (body["directive"] as? String) ?? ""
+			let plain = !raw.isEmpty && raw.count <= 32 && raw.allSatisfy { ($0 >= "a" && $0 <= "z") || $0 == "-" }
+			return plain ? raw : "other"
+		case "error":
+			let name = (body["name"] as? String) ?? ""
+			let known: Set<String> = ["Error", "TypeError", "ReferenceError", "SyntaxError", "RangeError", "EvalError", "URIError",
+			                          "libs_missing", "unknown"]
+			return known.contains(name) ? name : "other"
+		default:
+			return "other"
+		}
+	}
+
+	/// Content-Security-Policy of the host page. Nothing connects, loads, frames or starts a worker. Scripts run only
+	/// with this page's nonce, which the three inlined scripts carry. No 'unsafe-inline' and no 'unsafe-eval'.
+	static func contentSecurityPolicy(nonce: String) -> String {
+		[
+			"default-src 'none'",
+			"script-src 'nonce-\(nonce)'",
+			"connect-src 'none'",
+			"img-src 'none'",
+			"style-src 'none'",
+			"font-src 'none'",
+			"media-src 'none'",
+			"frame-src 'none'",
+			"child-src 'none'",
+			"worker-src 'none'",
+			"object-src 'none'",
+			"manifest-src 'none'",
+			"base-uri 'none'",
+			"form-action 'none'",
+		].joined(separator: "; ")
+	}
+
+	/// The page's origin. A secure https origin that no server answers; the CSP refuses every request, so nothing loads from it.
+	/// With no base URL (about:blank) both bundled libraries failed to load in the simulator (2026-11-14, 'Script error.' and
+	/// 'libs missing'). The cause is not isolated; the https origin was observed to boot and encrypt.
+	static let pageOrigin = URL(string: "https://openpgp-host.invalid/")!
+
+	/// A fresh nonce per page (hex, so it is a valid CSP base64-value).
+	static func makeNonce() -> String {
+		UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+	}
+
+	// MARK: - Teardown
+
+	/// Lock and logout: the page goes, and its JS heap with it (the WebView is released). Asynchronous on purpose: the caller may
+	/// hold its own lock. Calls waiting for the page fail, and none is re-run on a new page.
+	public func tearDown(reason: String) {
+		DispatchQueue.main.async { self.tearDownNow(reason: reason) }
+	}
+
+	private func tearDownNow(reason: String) {
+		let waiting = pending
+		pending.removeAll()
+		let calls = Array(inFlight.values)
+		inFlight.removeAll()
+		// Nothing is pending or in flight now, so the reset boots no new page.
+		resetHost(reason: "torn down (\(reason))")
+		for callback in waiting { callback(.failure(Self.tornDownError())) }
+		for call in calls { call.abandon() }
+	}
+
+	private static func tornDownError() -> NSError {
+		NSError(domain: "BeamioOpenPgp", code: -8, userInfo: [NSLocalizedDescriptionKey: "openpgp host torn down"])
 	}
 
 	// MARK: - Recovery
@@ -480,8 +601,17 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNaviga
 	/// sign / encrypt / decrypt failed until the app was relaunched (inbound
 	/// messages were dropped meanwhile). Rebuild it instead.
 	public func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+		#if BEAMIO_TEST_HOOKS
+		terminationCount += 1
+		#endif
 		resetHost(reason: "web content process terminated")
 	}
+
+	#if BEAMIO_TEST_HOOKS
+	/// Test hook only: times the WebView's content process was reported terminated, the one event that says a kill took effect, unlike `resetCount`, which also
+	/// moves for a boot timeout, a foreground probe, a teardown or a failed call. Written on the main queue and read by the test: a diagnostic, not a gate.
+	private(set) var terminationCount = 0
+	#endif
 
 	/// Times the host was rebuilt (diagnostics only).
 	public private(set) var resetCount = 0
@@ -493,6 +623,7 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNaviga
 		Self.diag(String(format: "host reset #%ld: %@ app=%@", resetCount, reason, Self.appStateLabel()))
 		if let wv = webView {
 			wv.navigationDelegate = nil
+			wv.stopLoading()
 			wv.configuration.userContentController.removeScriptMessageHandler(forName: "BeamioOpenPgp")
 		}
 		webView = nil
@@ -502,7 +633,7 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNaviga
 		bootStartedAt = nil
 		let stranded = inFlight
 		inFlight.removeAll()
-		for (_, moveToNewHost) in stranded { moveToNewHost() }
+		for (_, call) in stranded { call.rerun() }
 		// Callers still waiting for ready: boot the new page now.
 		if !pending.isEmpty { bootstrapIfNeeded() }
 	}
@@ -520,6 +651,27 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNaviga
 	/// The page never signalled ready. A normal boot takes 0.1–0.4 s; in the
 	/// background WebKit may hold the page back, so wait longer there.
 	static func bootTimeout(foreground: Bool) -> TimeInterval { foreground ? 3 : 8 }
+	/// The first boot of the process may be a cold start of the page process (the simulator measured over 3 s); it gets this longer timeout.
+	static let firstBootTimeout: TimeInterval = 8
+
+	/// Launch warm-up: starts the page in the background, without a pending call, so the first request does not wait on a cold start.
+	/// It never blocks: the boot runs on the main queue after this call returns.
+	public static func warmUpAtLaunch() {
+		DispatchQueue.main.async { shared.bootstrapIfNeeded() }
+	}
+
+#if BEAMIO_TEST_HOOKS
+	/// Test build only: a host of its own, so a test starts from a cold boot.
+	static func makeForTests() -> BeamioOpenPgpHost {
+		let host = BeamioOpenPgpHost()
+		host.isTestHost = true
+		return host
+	}
+	/// Only a test host takes the forced failures, so the shared host (a warm-up in another test) cannot consume them.
+	private var isTestHost = false
+	/// Test build only: the next boots fail at once (their timer fires), to test the single automatic retry and the error after it.
+	static var testBootFailuresRemaining = 0
+#endif
 	/// Sign / verify / address. Measured on a Mac (real WKWebView, warm): 5 ms;
 	/// the iPhone SE's whole dialer cancel (sign + two encrypts) logs 60–120 ms.
 	static let quickTimeout: TimeInterval = 4
@@ -572,8 +724,12 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNaviga
 	private var bootStartedAt: Date?
 	/// Last time any call returned on the current page (main thread).
 	private var lastAnswerAt = Date.distantPast
-	/// Calls running on the current page → "move to the new page" (main thread).
-	private var inFlight: [Int: () -> Void] = [:]
+	/// A call running on the current page. `rerun` moves it to a rebuilt page; `abandon` fails it (teardown). Main thread.
+	private struct InFlightCall {
+		let rerun: () -> Void
+		let abandon: () -> Void
+	}
+	private var inFlight: [Int: InFlightCall] = [:]
 	private var nextCallId = 0
 	/// Times the watchdog found the page stuck (diagnostics only).
 	public private(set) var watchdogCount = 0
@@ -611,8 +767,14 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNaviga
 		Self.diag(String(format: "host boot start app=%@", Self.appStateLabel()))
 		armBootTimer()
 		let config = WKWebViewConfiguration()
+		// H4: no website data is kept on disk; the page keeps nothing between runs, and this matches "Ephemeral" above.
+		config.websiteDataStore = .nonPersistent()
 		config.preferences.javaScriptEnabled = true
+		// the page may not open windows by itself (no UI delegate is set either, so none opens).
+		config.preferences.javaScriptCanOpenWindowsAutomatically = false
 		config.userContentController.add(self, name: "BeamioOpenPgp")
+		// Runtime WebSocket guard (AGENTS.md): installed before any script of this view runs.
+		BeamioWebSocketGuard.install(on: config, handler: BeamioWebSocketGuardHandler.shared)
 		let wv = WKWebView(frame: .zero, configuration: config)
 		wv.isHidden = true
 		wv.navigationDelegate = self
@@ -642,26 +804,37 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNaviga
 			return
 		}
 
+		// CSP with a per-page nonce for the three inlined scripts.
+		let nonce = Self.makeNonce()
 		let html = """
-		<!DOCTYPE html><html><head><meta charset="utf-8"/></head><body>
-		<script>\(ethersJs)</script>
-		<script>\(openpgpJs)</script>
-		<script>
+		<!DOCTYPE html><html><head><meta charset="utf-8"/>
+		<meta http-equiv="Content-Security-Policy" content="\(Self.contentSecurityPolicy(nonce: nonce))"/>
+		</head><body>
+		<script nonce="\(nonce)">
+		window.addEventListener('securitypolicyviolation', function(e){ window.webkit.messageHandlers.BeamioOpenPgp.postMessage({action:'csp', directive: String(e.violatedDirective)}); });
+		window.addEventListener('error', function(e){ window.webkit.messageHandlers.BeamioOpenPgp.postMessage({action:'error', name: (e.error && e.error.name) || 'unknown'}); });
+		</script>
+		<script nonce="\(nonce)">\(ethersJs)</script>
+		<script nonce="\(nonce)">\(openpgpJs)</script>
+		<script nonce="\(nonce)">
 		(function(){
 		  try {
 			if (typeof openpgp === 'undefined' || typeof ethers === 'undefined') {
-			  window.webkit.messageHandlers.BeamioOpenPgp.postMessage({action:'error', message:'libs missing'});
+			  window.webkit.messageHandlers.BeamioOpenPgp.postMessage({action:'error', name:'libs_missing'});
 			  return;
 			}
 			window.webkit.messageHandlers.BeamioOpenPgp.postMessage({action:'ready'});
 		  } catch (e) {
-			window.webkit.messageHandlers.BeamioOpenPgp.postMessage({action:'error', message:String(e)});
+			window.webkit.messageHandlers.BeamioOpenPgp.postMessage({action:'error', name: (e && e.name) || 'unknown'});
 		  }
 		})();
 		</script>
 		</body></html>
 		"""
-		wv.loadHTMLString(html, baseURL: Bundle.module.bundleURL)
+		// The first main-frame load (from this string) is the only navigation the policy allows. The base URL is the secure
+		// https origin in `pageOrigin`, not a file URL: the page gets no file origin and reaches no file of the bundle.
+		navigationPolicy.armInitialLoad()
+		wv.loadHTMLString(html, baseURL: Self.pageOrigin)
 	}
 
 	func runJs(
@@ -677,10 +850,15 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNaviga
 				])))
 				return
 			}
-			self.ensureReady { ok in
+			self.ensureReadyResult { readiness in
 				// ensureReady always finishes on main; keep evaluateJavaScript there.
 				assert(Thread.isMainThread)
-				guard ok, let wv = self.webView else {
+				if case .failure(let error) = readiness {
+					// the cause stays visible: a boot timeout is -1 (a retry can help), a teardown -8 (the account is changing)
+					completion(.failure(error))
+					return
+				}
+				guard let wv = self.webView else {
 					completion(.failure(NSError(domain: "BeamioOpenPgp", code: -3, userInfo: [
 						NSLocalizedDescriptionKey: "openpgp host not ready",
 					])))
@@ -708,7 +886,13 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNaviga
 						self.runJs(expression, work: work, retried: true, completion: completion)
 					}
 				}
-				self.inFlight[callId] = rerun
+				// Teardown (lock, logout): this call fails now, and nothing re-runs it on a new page.
+				let abandon: () -> Void = {
+					guard !finished else { return }
+					finished = true
+					completion(.failure(Self.tornDownError()))
+				}
+				self.inFlight[callId] = InFlightCall(rerun: rerun, abandon: abandon)
 				func watch(after delay: TimeInterval) {
 					DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
 						guard !finished else { return }
@@ -752,7 +936,7 @@ public final class BeamioOpenPgpHost: NSObject, WKScriptMessageHandler, WKNaviga
 					}
 				}
 				watch(after: window)
-				// Every expression is an `(async () => { ... })()` Promise. Plain
+				// Every expression is an `(async => {... })` Promise. Plain
 				// `evaluateJavaScript` cannot return a Promise and fails with
 				// "JavaScript execution returned a result of an unsupported type",
 				// which kept mailbox_listen in a permanent reconnect loop.

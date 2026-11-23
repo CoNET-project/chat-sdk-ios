@@ -63,6 +63,9 @@ public final class BeamioConetChatHistoryStore {
 	/// Cross-lane state (read lane, fetch workers, `isReady`), guarded by `stateLock`.
 	private let stateLock = NSLock()
 	private var master: Data?
+	/// Persists the ts_prov of this device's own write before the record is published.
+	/// Arguments: peer, sendKey, ts_prov. Set by the module to the session's local library.
+	var localTsProvSink: ((String, String, Int) -> Void)?
 	private var readyFlag = false
 	private var everSyncedFlag = false
 	private var snapshot: [IndexRecord] = []
@@ -116,16 +119,67 @@ public final class BeamioConetChatHistoryStore {
 		self.session = URLSession(configuration: config)
 	}
 
+	/// Account master for the local chat library (spec D1). nil until `prepare` succeeded.
+	func localLibraryMaster() -> Data? {
+		stateLock.lock()
+		defer { stateLock.unlock() }
+		return (readyFlag && !destroyed) ? master : nil
+	}
+
+	/// Index records (chain order) and the fragment fetcher for the local library's full sync.
+	func localSyncSource() -> (records: [[String: Any]], master: Data, fetch: (String) -> String?)? {
+		stateLock.lock()
+		let snap = snapshot
+		let m = readyFlag && !destroyed ? master : nil
+		stateLock.unlock()
+		guard let m else { return nil }
+		return (Self.encodeRecords(snap), m, { [weak self] cid in self?.fetchFragment(hash: cid) })
+	}
+
 	public func isReady() -> Bool {
 		stateLock.lock()
 		defer { stateLock.unlock() }
 		return readyFlag && !destroyed
 	}
 
+	/// A session lock: the history master and the index key are wiped and the store is no longer ready. The store itself stays; a new `init` after the
+	/// unlock builds it again. (`destroy` is the end of the session.)
+	public func lockKeys() {
+		stateLock.lock()
+		readyFlag = false
+		if master != nil { BeamioNativeWallet.wipe(&master!) }
+		master = nil
+		plain.removeAll()
+		snapshot = []
+		stateLock.unlock()
+		queue.async { [weak self] in
+			self?.indexKey = nil
+			self?.records = []
+		}
+	}
+
+	#if BEAMIO_TEST_HOOKS
+	/// Test hook: puts a master into a ready store, as a successful `prepare` would.
+	func setMasterForTests(_ value: Data) {
+		stateLock.lock()
+		master = value
+		readyFlag = true
+		stateLock.unlock()
+	}
+	#endif
+
+	/// Whether the master is held in memory (tests).
+	var holdsMasterForTests: Bool {
+		stateLock.lock()
+		defer { stateLock.unlock() }
+		return master != nil
+	}
+
 	public func destroy() {
 		stateLock.lock()
 		destroyed = true
 		readyFlag = false
+		if master != nil { BeamioNativeWallet.wipe(&master!) }
 		master = nil
 		plain.removeAll()
 		snapshot = []
@@ -156,11 +210,12 @@ public final class BeamioConetChatHistoryStore {
 		queue.async { [weak self] in
 			guard let self else { completion(false); return }
 			do {
-				let domain = "beamio.chat.history.v1|\(self.chainId)|\(self.eoa)"
-				let domainSig = try self.awaitEip191(domain)
 				// storageFragment checks sign(wallet) against the `wallet` field we send (lowercase).
 				self.selfSign = try self.awaitEip191(self.eoa)
-				let master = Keccak256.hash(Data(domainSig.utf8))
+				// C1: the protocol master is derived in the native wallet and stays in memory.
+				guard let master = BeamioNativeWallet.historyMaster(eoa: self.eoa, chainId: self.chainId) else {
+					throw BeamioNativeWallet.Failure.signFailed
+				}
 				self.indexKey = Self.hkdf(master: master, info: "index-enc", length: 32)
 				let genesis = Self.hkdf(master: master, info: Self.fragmentGenesisInfo, length: 32)
 				self.genesisCid = "0x" + Self.hex(genesis)
@@ -243,19 +298,7 @@ public final class BeamioConetChatHistoryStore {
 	func read(options: [String: Any]?, completion: @escaping ([Entry]) -> Void) {
 		readQueue.async { [weak self] in
 			guard let self, self.isReady() else { completion([]); return }
-			self.awaitRestoreIdle(timeout: Self.readRestoreWait)
-			self.stateLock.lock()
-			let needsSync = !self.everSyncedFlag && self.snapshot.isEmpty
-			self.stateLock.unlock()
-			if needsSync {
-				// Nothing restored yet: an empty answer would look like "no history".
-				let synced = DispatchSemaphore(value: 0)
-				self.queue.async {
-					self.syncFromHead()
-					synced.signal()
-				}
-				_ = synced.wait(timeout: .now() + Self.readRestoreWait)
-			}
+			// Read path: local snapshot only. No restore or sync wait (spec 9.1, T-15).
 			let peerRaw = String(options?["peer"] as? String ?? "").lowercased()
 			let query = String(options?["query"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 			let limit = Self.intValue(options?["limit"]) ?? 0
@@ -295,26 +338,46 @@ public final class BeamioConetChatHistoryStore {
 
 	// MARK: - Append / sync (queue only)
 
+	/// D10 sendKey for an empty sendId (spec 4.1, rule 2). K_id is derived from R_db in the native wallet layer, not from
+	/// the protocol master, so every device of the account derives the same key. nil when the native store has no key.
+	static func emptySendKey(eoa: String, peer: String, dir: String, ts: Int64, body: String,
+	                         store: BeamioChatWalletKeyStoring = BeamioConetChatSignBroker.keyStore) -> String? {
+		guard let root = BeamioChatWalletBoundary.localRoot(eoa: eoa, store: store) else { return nil }
+		return BeamioChatLocalCrypto.sendKeyDerived(idKey: BeamioChatLocalCrypto.idKey(localRoot: root),
+		                                           peer: peer, dir: dir, ts: ts, body: body)
+	}
+
 	private func appendUnlocked(_ entry: [String: Any]) -> Bool {
 		stateLock.lock()
 		let masterKey = readyFlag && !destroyed ? master : nil
 		stateLock.unlock()
 		guard let masterKey, let key = indexKey else { return false }
 		let rawSendId = String(entry["sendId"] as? String ?? "")
-		let sendId = rawSendId.isEmpty ? UUID().uuidString : rawSendId
+		let peer = String(entry["peer"] as? String ?? "").lowercased()
+		let dir = String(entry["dir"] as? String ?? "out")
+		let body = String(entry["body"] as? String ?? "")
+		let ts = Self.int64Value(entry["ts"]) ?? Int64(Date().timeIntervalSince1970 * 1000)
+		let tsGiven = Self.int64Value(entry["ts"]) != nil
+		// D10 (approved exception, spec v1.1 4.2): an empty sendId gets the deterministic sendKey instead of a
+		// random UUID, so the same message mirrored twice is one index record (T-22).
+		let sendId: String
+		if rawSendId.isEmpty {
+			guard let derived = Self.emptySendKey(eoa: eoa, peer: peer, dir: dir, ts: ts, body: body) else { return false }
+			sendId = derived
+		} else {
+			sendId = rawSendId
+		}
 		// Re-mirroring a conversation re-appends every bubble: skip what the index already has.
 		if records.contains(where: { $0.sendId == sendId }) { return true }
 		syncFromHead()
 		if records.contains(where: { $0.sendId == sendId }) { return true }
 
-		let peer = String(entry["peer"] as? String ?? "").lowercased()
-		let dir = String(entry["dir"] as? String ?? "out")
-		let body = String(entry["body"] as? String ?? "")
-		let ts = Self.int64Value(entry["ts"]) ?? Int64(Date().timeIntervalSince1970 * 1000)
+		// D16: 0 sender time, 1 receive-time fallback (sendId set), 3 receive-time fallback with a derived sendKey.
+		localTsProvSink?(peer, sendId, tsGiven ? 0 : (rawSendId.isEmpty ? 3 : 1))
 		let seq = records.last.map { $0.seq + 1 } ?? 0
 		let prevCid = records.last?.cid ?? genesisCid
 		do {
-			let fragKey = Self.hkdf(master: masterKey, info: "frag|\(seq)|\(prevCid)", length: 32)
+			let fragKey = BeamioFragmentKeys.key(master: masterKey, seq: seq, prevCid: prevCid)
 			let cipher = try Self.aesGcmEncrypt(key: fragKey, plaintext: Data(body.utf8))
 			let cid = Keccak256.hexUtf8(cipher)
 			guard uploadFragment(cipher) != nil else { return false }
@@ -454,7 +517,7 @@ public final class BeamioConetChatHistoryStore {
 		if let cached { return cached }
 		guard let masterKey, let cipher = fetchFragment(hash: rec.cid) else { return nil }
 		do {
-			let key = Self.hkdf(master: masterKey, info: "frag|\(rec.seq)|\(rec.prevCid)", length: 32)
+			let key = BeamioFragmentKeys.key(master: masterKey, seq: rec.seq, prevCid: rec.prevCid)
 			let body = try Self.aesGcmDecrypt(key: key, b64: cipher)
 			let entry = Entry(seq: rec.seq, ts: rec.ts, peer: rec.peer, dir: rec.dir, sendId: rec.sendId, body: body)
 			stateLock.lock()
@@ -500,38 +563,12 @@ public final class BeamioConetChatHistoryStore {
 			"seq": String(recordCount),
 			"nonce": nonce,
 		]
-		let typedData: [String: Any] = [
-			"types": [
-				"EIP712Domain": [
-					["name": "name", "type": "string"],
-					["name": "version", "type": "string"],
-					["name": "chainId", "type": "uint256"],
-					["name": "verifyingContract", "type": "address"],
-				],
-				"SetPointer": [
-					["name": "owner", "type": "address"],
-					["name": "indexHash", "type": "bytes32"],
-					["name": "ts", "type": "uint64"],
-					["name": "seq", "type": "uint64"],
-					["name": "nonce", "type": "uint256"],
-				],
-			],
-			"primaryType": "SetPointer",
-			"domain": [
-				"name": "ChatIndexRegistry",
-				"version": "1",
-				"chainId": chainId,
-				"verifyingContract": registryAddress,
-			],
-			// `value` is what the PWA signer reads; `message` is the EIP-712 JSON spelling.
-			"value": message,
-			"message": message,
-		]
-		let signature: String
-		do {
-			signature = try awaitEip712(typedData)
-		} catch {
-			log("warn", "[history] SetPointer sign failed: \(error.localizedDescription)")
+		// pointerEip712: the native wallet signs the fixed SetPointer struct. Nothing else is encodable.
+		guard case .success(let signature) = BeamioNativeWallet.signSetPointer(
+			eoa: eoa, registry: registryAddress, indexHash: indexHash,
+			ts: String(ts), seq: String(recordCount), nonce: nonce
+		) else {
+			log("warn", "[history] SetPointer sign failed")
 			return false
 		}
 		var body = message
@@ -628,26 +665,19 @@ public final class BeamioConetChatHistoryStore {
 
 	// MARK: - Signing
 
-	private func awaitEip191(_ message: String) throws -> String {
-		let sem = DispatchSemaphore(value: 0)
-		var out: Result<String, Error> = .failure(NSError(domain: "sign", code: -1, userInfo: [NSLocalizedDescriptionKey: "sign_timeout"]))
-		BeamioConetChatSignBroker.requestEip191(message: message) { result in
-			out = result
-			sem.signal()
-		}
-		_ = sem.wait(timeout: .now() + 35)
-		return try out.get()
+	#if BEAMIO_TEST_HOOKS
+	/// Test build only: the self-signature the store makes at prepare.
+	func testSelfSign() throws -> String {
+		try awaitEip191(eoa)
 	}
+#endif
 
-	private func awaitEip712(_ typedData: [String: Any]) throws -> String {
-		let sem = DispatchSemaphore(value: 0)
-		var out: Result<String, Error> = .failure(NSError(domain: "sign", code: -1, userInfo: [NSLocalizedDescriptionKey: "sign_timeout"]))
-		BeamioConetChatSignBroker.requestEip712(typedData: typedData) { result in
-			out = result
-			sem.signal()
+	private func awaitEip191(_ message: String) throws -> String {
+		// the record is signed for the store's account, and only while that account is the signer.
+		switch BeamioConetChatSignBroker.requestEip191Sync(message: message, expectedEoa: eoa) {
+		case .success(let signature): return signature
+		case .failure(let failure): throw failure
 		}
-		_ = sem.wait(timeout: .now() + 35)
-		return try out.get()
 	}
 
 	// MARK: - Records

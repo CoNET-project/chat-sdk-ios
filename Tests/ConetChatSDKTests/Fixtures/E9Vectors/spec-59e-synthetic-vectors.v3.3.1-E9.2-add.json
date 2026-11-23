@@ -1,0 +1,297 @@
+{
+  "file": "spec-59e-synthetic-vectors.v3.3.1-E9.2-add.json",
+  "scope": "mnemonic-source-priority-synthetic",
+  "status": "pending_review",
+  "extends": "spec-59e-errata-v3.3.1-E9.md, E9.1.md, E9.2.md",
+  "decision_source": "决定",
+  "order": [
+    "pwa_current_valid",
+    "native_current_record_valid",
+    "native_sealed_copy_valid"
+  ],
+  "fixtures_note": "Synthetic only. Sources are checked in order; a source is consulted only if the previous one is confirmed empty. Read failure is unknown and never counts as empty. Sealed copies are read from SDK-readable locations only.",
+  "cases": [
+    {
+      "id": "E92-01",
+      "title": "PWA 有效助记词 → 直接使用，不查原生",
+      "policy": "decided_by_owner_2026-11-17",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": true,
+          "eoa_matches_keyID": true,
+          "read": "ok"
+        },
+        "native": {
+          "not_consulted": true
+        }
+      },
+      "op": {
+        "command": "resolve_mnemonic_source"
+      },
+      "expect": {
+        "source_used": "pwa_current",
+        "answer": "valid_reconnect",
+        "native_calls": 0,
+        "deleted": []
+      },
+      "source": "E9.2-1 第 1 项"
+    },
+    {
+      "id": "E92-02",
+      "title": "PWA 无；原生当前记录与封存副本都有效且账户不同 → 以当前记录为准，valid，回传当前账户，不判多账户 unknown",
+      "policy": "decided_by_owner_2026-11-17",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "current_record": {
+            "valid": true,
+            "eoa": "ACCOUNT_CURRENT"
+          },
+          "sealed_copies": [
+            {
+              "valid": true,
+              "eoa": "ACCOUNT_OTHER",
+              "audit_time": "T2"
+            }
+          ]
+        }
+      },
+      "op": {
+        "command": "resolve_mnemonic_source"
+      },
+      "expect": {
+        "source_used": "native_current_record",
+        "answer": "valid_reconnect",
+        "returned_account": "ACCOUNT_CURRENT",
+        "multi_account_unknown": false,
+        "sealed_copy_considered": false,
+        "deleted": []
+      },
+      "source": "E9.2-2 第 1 项"
+    },
+    {
+      "id": "E92-03",
+      "title": "PWA 无；当前记录确认没有；只有封存副本有效 → 接回副本账户",
+      "policy": "decided_by_owner_2026-11-17",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "current_record": {
+            "valid": false,
+            "confirmed_empty": true
+          },
+          "sealed_copies": [
+            {
+              "valid": true,
+              "eoa": "ACCOUNT_COPY",
+              "audit_time": "T1"
+            }
+          ]
+        }
+      },
+      "op": {
+        "command": "resolve_mnemonic_source"
+      },
+      "expect": {
+        "source_used": "native_sealed_copy",
+        "answer": "valid_reconnect",
+        "returned_account": "ACCOUNT_COPY",
+        "deleted": [],
+        "files_retained": true
+      },
+      "source": "E9.2-2 第 2 项"
+    },
+    {
+      "id": "E92-04",
+      "title": "全部缺失（PWA、当前记录、全部副本确认没有；半写残留与旧标记存在）→ onboarding，数据保留",
+      "policy": "decided_by_owner_2026-11-17",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "current_record": {
+            "valid": false,
+            "confirmed_empty": true
+          },
+          "sealed_copies": [
+            {
+              "valid": false,
+              "confirmed_empty": true
+            }
+          ],
+          "intent_marker": "pending_no_newRecordSha",
+          "partial_rec": true
+        }
+      },
+      "op": {
+        "command": "resolve_mnemonic_source"
+      },
+      "expect": {
+        "source_used": null,
+        "answer": "onboarding",
+        "half_write_or_stale_marker_blocks": false,
+        "deleted": [],
+        "files": {
+          "intent_marker": "retained",
+          "partial_rec": "retained"
+        }
+      },
+      "source": "E9.2-1 三者都确认没有；E9 原则"
+    },
+    {
+      "id": "E92-05",
+      "title": "当前记录读取故障 → unknown，不跳到封存副本（副本中有有效助记词也不取）",
+      "policy": "decided_by_owner_2026-11-17",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "current_record": {
+            "read": "failed"
+          },
+          "sealed_copies": [
+            {
+              "valid": true,
+              "eoa": "ACCOUNT_COPY"
+            }
+          ]
+        }
+      },
+      "op": {
+        "command": "resolve_mnemonic_source"
+      },
+      "expect": {
+        "answer": "unknown",
+        "sealed_copy_consulted": false,
+        "onboarding_entered": false,
+        "deleted": [],
+        "retry": true
+      },
+      "source": "E9.2-3；E9.2-1 读取故障不算没有"
+    },
+    {
+      "id": "E92-06",
+      "title": "（待裁定）PWA 无；当前记录无效；多个封存副本有效且账户不同 → 建议规则：取最近封存（审计时间最新）",
+      "policy": "pending_determination; proposed_rule_E9.2-4",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "current_record": {
+            "valid": false,
+            "confirmed_empty": true
+          },
+          "sealed_copies": [
+            {
+              "valid": true,
+              "eoa": "ACCOUNT_A",
+              "audit_time": "T1"
+            },
+            {
+              "valid": true,
+              "eoa": "ACCOUNT_B",
+              "audit_time": "T2"
+            }
+          ]
+        }
+      },
+      "op": {
+        "command": "resolve_mnemonic_source"
+      },
+      "expect_if_proposed_rule_adopted": {
+        "answer": "valid_reconnect",
+        "returned_account": "ACCOUNT_B",
+        "reason": "latest_sealed_copy_by_audit_time"
+      },
+      "expect_if_tie_or_missing_audit_time": {
+        "answer": "unknown",
+        "deleted": [],
+        "retry": true
+      },
+      "deleted": [],
+      "source": "E9.2-4（待裁定）"
+    },
+    {
+      "id": "E92-07",
+      "title": "当前记录有效 → 封存副本不查询（副本读取会失败也不影响结果）→ valid",
+      "policy": "decided_by_owner_2026-11-17",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "current_record": {
+            "valid": true,
+            "eoa": "ACCOUNT_CURRENT"
+          },
+          "sealed_copies": [
+            {
+              "read": "failed"
+            }
+          ]
+        }
+      },
+      "op": {
+        "command": "resolve_mnemonic_source"
+      },
+      "expect": {
+        "answer": "valid_reconnect",
+        "returned_account": "ACCOUNT_CURRENT",
+        "sealed_copy_consulted": false,
+        "deleted": []
+      },
+      "source": "E9.2-2 第 1 项；E9.2-3 第 3 项"
+    },
+    {
+      "id": "E92-08",
+      "title": "当前记录确认没有；封存副本读取故障 → unknown，不进入 onboarding",
+      "policy": "decided_by_owner_2026-11-17",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "current_record": {
+            "valid": false,
+            "confirmed_empty": true
+          },
+          "sealed_copies": [
+            {
+              "read": "failed"
+            }
+          ]
+        }
+      },
+      "op": {
+        "command": "resolve_mnemonic_source"
+      },
+      "expect": {
+        "answer": "unknown",
+        "onboarding_entered": false,
+        "deleted": [],
+        "retry": true
+      },
+      "source": "E9.2-3 第 2 项"
+    }
+  ],
+  "open_items": [
+    "E92-06 多副本规则待裁定（E9.2-4）",
+    "E91-07 活动标记键名待两端 SDK 报实际键名后定稿（E9.2-6）"
+  ],
+  "not_pinned": true,
+  "not_in_spec": true
+}

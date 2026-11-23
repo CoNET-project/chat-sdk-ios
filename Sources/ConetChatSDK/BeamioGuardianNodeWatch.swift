@@ -36,10 +36,12 @@ public final class BeamioGuardianNodeWatch {
 	static let shrinkConfirm: TimeInterval = 20 * 60
 
 	private let queue = DispatchQueue(label: "beamio.guardian.watch")
-	private let defaults = UserDefaults.standard
+	private let defaults = BeamioDefaults.standard
 	private let keyRoot = "beamio.guardian.storageRoot"
 	private let keyBlock = "beamio.guardian.block"
 	private let keyBuiltAt = "beamio.guardian.builtAt"
+	/// Set once a table read has stored the nodes with their PGP keys (see `readAll`).
+	private let keyNodeKeys = "beamio.guardian.nodeKeysV1"
 
 	private var running = false
 	private var lastPoll = Date.distantPast
@@ -110,7 +112,12 @@ public final class BeamioGuardianNodeWatch {
 		if !changed, Date().timeIntervalSince(builtAt) > Self.forceFullReadInterval {
 			changed = true
 			why = "daily read"
-		}
+			}
+			// A roster stored before node keys were kept has none: read the table once more to fill them in.
+			if !changed, !defaults.bool(forKey: keyNodeKeys) {
+				changed = true
+				why = "node keys"
+			}
 		if !changed {
 			failures = 0
 			// Nothing to read; remember how far we checked for the log fallback.
@@ -128,6 +135,7 @@ public final class BeamioGuardianNodeWatch {
 		let nodes = rows.map(\.node)
 		let mailbox = matchMailbox(rows)
 		guard BeamioChatPgpKeychain.storeChainRoster(nodes: nodes, mailboxIp: mailbox) else { return fail("store") }
+		defaults.set(true, forKey: keyNodeKeys)
 		if root.isEmpty, !proofUnsupported, case .value(let r) = storageRoot(at: target) { root = r }
 		defaults.set(root, forKey: keyRoot)
 		defaults.set(target, forKey: keyBlock)
@@ -319,13 +327,15 @@ public final class BeamioGuardianNodeWatch {
 			guard let ip = BeamioSiCipherPost.normalizeIp(ipRaw) else { continue }
 			let domain = String(pgpKey.trimmingCharacters(in: .whitespacesAndNewlines).prefix(256))
 			let regionTrim = String(region.trimmingCharacters(in: .whitespacesAndNewlines).prefix(64))
-			out.append(Row(node: .init(ip: ip, domain: domain, region: regionTrim), armor: armorFromBase64(pgp)))
+			// The row's PGP key is the entry key: it stays with the node, or the senders have nothing to wrap to.
+			let nodeArmor = armorFromBase64(pgp)
+			out.append(Row(node: .init(ip: ip, domain: domain, region: regionTrim, armoredPublicKey: nodeArmor), armor: nodeArmor))
 		}
 		return out
 	}
 
 	private func matchMailbox(_ rows: [Row]) -> String? {
-		let route = normalizeArmor(BeamioChatPgpKeychain.loadRoutePublicArmor())
+		let route = normalizeArmor(BeamioChatPgpKeychain.loadRoutePublicArmor(eoa: BeamioNativeAccountPointer.get()))
 		guard route.contains("BEGIN PGP PUBLIC KEY") else { return nil }
 		return rows.first { normalizeArmor($0.armor) == route }?.node.ip
 	}

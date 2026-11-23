@@ -1,0 +1,148 @@
+{
+  "vectorSet": "shell-record-read-not-ready-reasons",
+  "version": "v2",
+  "supersedes": "VECTOR-shell-record-read-not-ready-reasons-v1-2026-11-21.json（信封形状已取代，仅语义参考）",
+  "authority": "PROTOCOL-...-draft-v162 第 182.2 节与 VECTOR-shell-record-read-answer-shape-v1",
+  "status": "新文件（v2，权威形状）；v1 原件不改",
+  "reasons": {
+    "storage_locked": {
+      "retryable": false,
+      "branch": "A"
+    },
+    "g1_uninitialized": {
+      "retryable": true,
+      "branch": "B"
+    },
+    "ambiguous_accounts": {
+      "retryable": false,
+      "branch": "C"
+    }
+  },
+  "cases": [
+    {
+      "id": "SRR2-01-storage_locked",
+      "state": {
+        "storageDerivedLock": true
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "not_ready",
+          "notReadyReason": "storage_locked",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "SRR2-02-g1_uninitialized",
+      "state": {
+        "g1Session": "not_established"
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "not_ready",
+          "notReadyReason": "g1_uninitialized",
+          "retryable": true
+        }
+      }
+    },
+    {
+      "id": "SRR2-03-ambiguous_accounts",
+      "state": {
+        "keyCount": 2,
+        "accountPointer": "empty"
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "not_ready",
+          "notReadyReason": "ambiguous_accounts",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "SRR2-04-persistent-storage_locked-after-10",
+      "state": {
+        "sameProcessConsecutiveSameReason": 10,
+        "reason": "storage_locked"
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "error",
+          "sub": "not_ready_persistent",
+          "notReadyReason": "storage_locked",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "SRR2-05-persistent-g1_uninitialized-after-10",
+      "state": {
+        "sameProcessConsecutiveSameReason": 10,
+        "reason": "g1_uninitialized"
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "error",
+          "sub": "not_ready_persistent",
+          "notReadyReason": "g1_uninitialized",
+          "retryable": true
+        }
+      }
+    },
+    {
+      "id": "SRR2-06-count-reset-on-reason-change",
+      "state": {
+        "sameProcessConsecutiveSameReason": 9,
+        "reason": "g1_uninitialized",
+        "nextReason": "storage_locked"
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "not_ready",
+          "notReadyReason": "storage_locked",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "SRR2-07-absent-control",
+      "state": {
+        "keychainItem": "absent",
+        "pageRecord": "absent"
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "absent"
+        }
+      },
+      "note": "SHAPE-01 形状。"
+    }
+  ],
+  "forbidden": [
+    "not_ready 答为信封级 ok:false",
+    "retryable 与原因不符（storage_locked、ambiguous_accounts 不得为 true；g1_uninitialized 不得为 false）",
+    "not_ready_persistent 缺 notReadyReason",
+    "absent 答为 walletState 形状"
+  ]
+}

@@ -1,146 +1,126 @@
 import Foundation
 
-/// Signing for the module. With a wallet key from the page (kept in
-/// `BeamioChatWalletKeychain`) the module signs locally, so a VoIP push can open
-/// the mailbox listen without the page. Without one it falls back to 1B: it asks
-/// the PWA main thread to EIP-191 / EIP-712 sign.
+/// Module-facing adapter over the native wallet. It holds only the session's
+/// address, never a key. Signing is done inside the native wallet module; there is no WebView signing path (S-3).
 public enum BeamioConetChatSignBroker {
-	public typealias WebEmit = (_ payload: [String: Any]) -> Void
+	public enum SignError: Error, Equatable {
+		case walletKeyMissing
+		case signFailed
+		/// F3: the account asked for is not the signer. Nothing is signed.
+		case signerChanged
+	}
 
 	private static let lock = NSLock()
-	private static var pending: [String: (Bool, String?, String?) -> Void] = [:]
-	private static var emit: WebEmit?
-	private static let defaultTimeout: TimeInterval = 30
-	/// Local signer key (memory only). Guarded by `lock`.
-	private static var localKey = ""
+	private static var signerEoa = ""
+#if BEAMIO_TEST_HOOKS
+	/// Test build only: how many signatures were asked of the wallet.
+	static var testSignAttempts = 0
+	/// Test build only: a signature is asked and never answers.
+	static var testHangSigning = false
+	/// Test build only: the signature the test gives in place of the wallet. The test decides when it answers, and may act meanwhile.
+	static var testSignature: ((String, @escaping (Result<String, Error>) -> Void) -> Void)? = nil
+#endif
 
-	public static func setLocalSigner(privateKeyHex: String) {
+	/// Native key store (the wallet module's). Tests replace it with an in-memory store.
+	public static var keyStore: BeamioChatWalletKeyStoring {
+		get { BeamioNativeWallet.keyStore }
+		set { BeamioNativeWallet.keyStore = newValue }
+	}
+
+	/// Called when a session starts for `eoa`. The broker holds only the address, never a key.
+	public static func setSignerEoa(_ eoa: String) {
 		lock.lock()
-		localKey = BeamioChatWalletKeychain.normalizeKey(privateKeyHex)
+		signerEoa = eoa.lowercased()
 		lock.unlock()
 	}
 
-	public static func clearLocalSigner() {
+	public static func clearSigner() {
 		lock.lock()
-		localKey = ""
+		signerEoa = ""
 		lock.unlock()
 	}
 
-	public static func hasLocalSigner() -> Bool {
+	public static func currentSignerEoa() -> String {
 		lock.lock(); defer { lock.unlock() }
-		return !localKey.isEmpty
+		return signerEoa
 	}
 
-	private static func currentLocalKey() -> String {
+	private static func currentEoa() -> String {
 		lock.lock(); defer { lock.unlock() }
-		return localKey
+		return signerEoa
 	}
 
-	public static func setWebEmit(_ emit: WebEmit?) {
-		lock.lock()
-		self.emit = emit
-		lock.unlock()
+	/// the listen authentication of the background path, for the listen session's own account. Not a page command, not through the
+	/// bridge, and nothing is returned to the page. The only caller is the listen session's authentication.
+	public static func requestListenAuth(
+		eoa: String,
+		message: String,
+		completion: @escaping (Result<String, Error>) -> Void
+	) {
+		// the listen authentication is signed for the signer's account only. Another account is refused before any signature.
+		let signer = currentEoa()
+		guard !signer.isEmpty, signer == eoa.lowercased() else {
+			completion(.failure(SignError.signerChanged))
+			return
+		}
+#if BEAMIO_TEST_HOOKS
+		testSignAttempts += 1
+#endif
+		switch BeamioNativeWallet.signListenAuth(eoa: eoa, message: message) {
+		case .success(let signature): completion(.success(signature))
+		case .failure(.walletKeyMissing): completion(.failure(SignError.walletKeyMissing))
+		case .failure: completion(.failure(SignError.signFailed))
+		}
 	}
 
-	/// Request EIP-191 `personal_sign(message)` from PWA.
+	/// The synchronous form. The signer is read once and must be `expectedEoa`; another signer is
+	/// refused before any signature is made, and the signature is made for that same account.
+	public static func requestEip191Sync(message: String, expectedEoa: String) -> Result<String, Error> {
+		let eoa = currentEoa()
+		guard !eoa.isEmpty else { return .failure(SignError.walletKeyMissing) }
+		guard expectedEoa.lowercased() == eoa else { return .failure(SignError.signerChanged) }
+#if BEAMIO_TEST_HOOKS
+		testSignAttempts += 1
+#endif
+		switch BeamioNativeWallet.signEip191(eoa: eoa, message: message) {
+		case .success(let signature): return .success(signature)
+		case .failure(.walletKeyMissing): return .failure(SignError.walletKeyMissing)
+		case .failure: return .failure(SignError.signFailed)
+		}
+	}
+
+	/// EIP-191 `personal_sign(message)` through the native wallet module. `expectedEoa`: the account the caller means to sign for.
+	/// A different signer is refused before any signature is made. The signer is read once, and signed for that same account.
 	public static func requestEip191(
 		message: String,
 		timeout: TimeInterval = 30,
+		expectedEoa: String? = nil,
 		completion: @escaping (Result<String, Error>) -> Void
 	) {
-		let key = currentLocalKey()
-		if !key.isEmpty {
-			BeamioOpenPgpHost.shared.signEip191(privateKeyHex: key, message: message, completion: completion)
+		_ = timeout
+		let eoa = currentEoa()
+		guard !eoa.isEmpty else {
+			completion(.failure(SignError.walletKeyMissing))
 			return
 		}
-		request(kind: "eip191", message: message, typedData: nil, timeout: timeout, completion: completion)
-	}
-
-	/// Request EIP-712 typed data signature from PWA.
-	public static func requestEip712(
-		typedData: [String: Any],
-		timeout: TimeInterval = 30,
-		completion: @escaping (Result<String, Error>) -> Void
-	) {
-		let key = currentLocalKey()
-		if !key.isEmpty {
-			BeamioOpenPgpHost.shared.signEip712(privateKeyHex: key, typedData: typedData, completion: completion)
+		if let expectedEoa, expectedEoa.lowercased() != eoa {
+			completion(.failure(SignError.signerChanged))
 			return
 		}
-		request(kind: "eip712", message: nil, typedData: typedData, timeout: timeout, completion: completion)
-	}
-
-	public static func fulfill(fromWeb body: [String: Any]) {
-		let reqId = String(body["reqId"] as? String ?? "")
-		guard !reqId.isEmpty else { return }
-		let ok = (body["ok"] as? Bool) ?? false
-		let signature = body["signature"] as? String
-		let error = body["error"] as? String
-		lock.lock()
-		let cb = pending.removeValue(forKey: reqId)
-		lock.unlock()
-		cb?(ok, signature, error)
-	}
-
-	public static func cancelAll(reason: String = "destroyed") {
-		lock.lock()
-		let all = pending
-		pending.removeAll()
-		lock.unlock()
-		for (_, cb) in all {
-			cb(false, nil, reason)
-		}
-	}
-
-	private static func request(
-		kind: String,
-		message: String?,
-		typedData: [String: Any]?,
-		timeout: TimeInterval,
-		completion: @escaping (Result<String, Error>) -> Void
-	) {
-		let reqId = UUID().uuidString
-		lock.lock()
-		let emitFn = emit
-		pending[reqId] = { ok, signature, error in
-			if ok, let sig = signature, !sig.isEmpty {
-				completion(.success(sig))
-			} else {
-				completion(.failure(NSError(
-					domain: "BeamioConetChatSignBroker",
-					code: -1,
-					userInfo: [NSLocalizedDescriptionKey: error ?? "sign_failed"]
-				)))
-			}
-		}
-		lock.unlock()
-
-		guard let emitFn else {
-			fulfillLocal(reqId: reqId, ok: false, error: "no_web_emit")
+#if BEAMIO_TEST_HOOKS
+		testSignAttempts += 1
+#endif
+#if BEAMIO_TEST_HOOKS
+		if testHangSigning { return }
+		if let testSignature {
+			testSignature(message, completion)
 			return
 		}
-
-		var payload: [String: Any] = [
-			"action": "chatModuleSignRequest",
-			"reqId": reqId,
-			"kind": kind,
-		]
-		if let message { payload["message"] = message }
-		if let typedData { payload["typedData"] = typedData }
-		emitFn(payload)
-
-		DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-			lock.lock()
-			let still = pending.removeValue(forKey: reqId)
-			lock.unlock()
-			still?(false, nil, "sign_timeout")
+#endif
+		switch BeamioNativeWallet.signEip191(eoa: eoa, message: message) {
+		case .success(let signature): completion(.success(signature))
+		case .failure(.walletKeyMissing): completion(.failure(SignError.walletKeyMissing))
+		case .failure: completion(.failure(SignError.signFailed))
 		}
-	}
-
-	private static func fulfillLocal(reqId: String, ok: Bool, error: String?) {
-		lock.lock()
-		let cb = pending.removeValue(forKey: reqId)
-		lock.unlock()
-		cb?(ok, nil, error)
 	}
 }

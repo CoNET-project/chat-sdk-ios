@@ -111,7 +111,7 @@ public enum BeamioSiCipherPost {
 		var seen = Set<String>()
 		for node in nodes {
 			guard let ip = normalizeIp(node.ip), !blocked.contains(ip), !dead.contains(ip), seen.insert(ip).inserted else { continue }
-			pool.append(BeamioChatPgpKeychain.SiNode(ip: ip, domain: node.domain, region: node.region))
+			pool.append(BeamioChatPgpKeychain.SiNode(ip: ip, domain: node.domain, region: node.region, armoredPublicKey: node.armoredPublicKey))
 		}
 
 		// Warm pool first: an entry checked in the background returns at once (no probe here).
@@ -607,7 +607,7 @@ public enum BeamioSiCipherPost {
 
 	// MARK: - Long-lived SSE POST
 
-	/// Handle for a running SSE stream. Call `cancel()` to close it.
+	/// Handle for a running SSE stream. Call `cancel` to close it.
 	public final class SseHandle {
 		private let lock = NSLock()
 		private var action: (() -> Void)?

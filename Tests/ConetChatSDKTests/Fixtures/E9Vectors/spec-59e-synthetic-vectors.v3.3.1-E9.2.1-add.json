@@ -1,0 +1,189 @@
+{
+  "file": "spec-59e-synthetic-vectors.v3.3.1-E9.2.1-add.json",
+  "scope": "mnemonic-source-multi-sealed-copy-synthetic",
+  "status": "pending_review",
+  "extends": "spec-59e-errata-v3.3.1-E9.2.md (E92-06 replaced by the finalized cases below)",
+  "replaces": {
+    "E92-06": "pending_determination -> finalized as E92-06 below"
+  },
+  "decision_source": "裁定 2026-11-17 (E9.2-4)",
+  "fixtures_note": "Synthetic only. Audit timestamps are synthetic (T1 < T2). 'current record' is confirmed empty in all cases. Sealed copies are SDK-readable.",
+  "cases": [
+    {
+      "id": "E92-06",
+      "title": "（定稿）PWA 无；当前记录确认无；两个封存副本有效且账户不同 → 取审计时间戳最近者（副本 B），valid，回传 ACCOUNT_B",
+      "policy": "decided",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "current_record": {
+            "valid": false,
+            "confirmed_empty": true
+          },
+          "sealed_copies": [
+            {
+              "name": "copy_A",
+              "valid": true,
+              "eoa": "ACCOUNT_A",
+              "audit_time": "T1"
+            },
+            {
+              "name": "copy_B",
+              "valid": true,
+              "eoa": "ACCOUNT_B",
+              "audit_time": "T2"
+            }
+          ],
+          "relation": "T1 < T2"
+        }
+      },
+      "op": {
+        "command": "resolve_mnemonic_source"
+      },
+      "expect": {
+        "answer": "valid_reconnect",
+        "returned_account": "ACCOUNT_B",
+        "reason": "latest_sealed_copy_by_audit_time",
+        "deleted": [],
+        "files_retained": true
+      },
+      "source": "E9.2.1-1 第 1、2 项"
+    },
+    {
+      "id": "E92-06a",
+      "title": "（新增）同上，但两副本审计时间戳相同（T1 = T2）→ unknown，保留，可重试，不选择任一副本",
+      "policy": "decided",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "current_record": {
+            "valid": false,
+            "confirmed_empty": true
+          },
+          "sealed_copies": [
+            {
+              "name": "copy_A",
+              "valid": true,
+              "eoa": "ACCOUNT_A",
+              "audit_time": "T1"
+            },
+            {
+              "name": "copy_B",
+              "valid": true,
+              "eoa": "ACCOUNT_B",
+              "audit_time": "T1"
+            }
+          ],
+          "relation": "T1 = T2"
+        }
+      },
+      "op": {
+        "command": "resolve_mnemonic_source"
+      },
+      "expect": {
+        "answer": "unknown",
+        "returned_account": null,
+        "onboarding_entered": false,
+        "deleted": [],
+        "retry": true
+      },
+      "source": "E9.2.1-1 第 3 项"
+    },
+    {
+      "id": "E92-06b",
+      "title": "（新增）同上，但副本 B 缺少审计时间戳 → unknown，保留，可重试",
+      "policy": "decided",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "current_record": {
+            "valid": false,
+            "confirmed_empty": true
+          },
+          "sealed_copies": [
+            {
+              "name": "copy_A",
+              "valid": true,
+              "eoa": "ACCOUNT_A",
+              "audit_time": "T1"
+            },
+            {
+              "name": "copy_B",
+              "valid": true,
+              "eoa": "ACCOUNT_B",
+              "audit_time": null
+            }
+          ]
+        }
+      },
+      "op": {
+        "command": "resolve_mnemonic_source"
+      },
+      "expect": {
+        "answer": "unknown",
+        "returned_account": null,
+        "onboarding_entered": false,
+        "deleted": [],
+        "retry": true
+      },
+      "source": "E9.2.1-1 第 3 项（缺少审计时间戳）"
+    },
+    {
+      "id": "E92-06c",
+      "title": "（新增）最近封存的副本读取失败，次近副本有效 → unknown，不改用次近副本",
+      "policy": "decided",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native": {
+          "current_record": {
+            "valid": false,
+            "confirmed_empty": true
+          },
+          "sealed_copies": [
+            {
+              "name": "copy_A",
+              "valid": true,
+              "eoa": "ACCOUNT_A",
+              "audit_time": "T1"
+            },
+            {
+              "name": "copy_B",
+              "read": "failed",
+              "audit_time": "T2"
+            }
+          ],
+          "relation": "T1 < T2"
+        }
+      },
+      "op": {
+        "command": "resolve_mnemonic_source"
+      },
+      "expect": {
+        "answer": "unknown",
+        "returned_account": null,
+        "fallback_to_copy_A": false,
+        "onboarding_entered": false,
+        "deleted": [],
+        "retry": true
+      },
+      "source": "E9.2.1-2（E9.2-3 副本读取故障不跳过）"
+    }
+  ],
+  "open_items": [
+    "E91-07 活动标记键名待两端 SDK 报实际键名后定稿（E9.2-6；本轮不处理）"
+  ],
+  "not_pinned": true,
+  "not_in_spec": true
+}

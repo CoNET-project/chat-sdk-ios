@@ -1,0 +1,1043 @@
+{
+  "file": "passcode-locked-exemption-vectors.v1.json",
+  "revision": "2026-11-20",
+  "spec": "冻结件 PROTOCOL-shell-passcode-v1-FROZEN-2026-11-20.md：第十二节（第 243–244 行）、第四节（第 119 行 locked）、第七节 §7.3（第 181–182 行）",
+  "generator": "gen-passcode-locked-exemption.mjs",
+  "purpose": "口令锁定态豁免：六名只在 G0 与锁定态可达（其余 G1 为 not_ready）；门控命令在锁定态答 locked（信封不带 reason）；读取失败造成的锁定不得为 locked；walletStatus 的 passcode_required 只在其 notReadyReason 中出现。新增单列文件，不改 gate-state v1/v2 与 no-key 原件。",
+  "states": {
+    "g0": "原生无密钥（G0）",
+    "g1": "原生已初始化、会话未就绪（G1）",
+    "g2_pointer_empty": "会话就绪（G2）但指针为空（无当前账户）",
+    "locked_passcode_required": "口令锁定（有头且口令记录存在）",
+    "locked_unreadable": "读取失败造成的锁定（口令态读不出）；不是口令锁，不得答 locked"
+  },
+  "allowedWhen": {
+    "g0": [
+      "passcodeProvision",
+      "passcodeUnlock",
+      "passcodeChange",
+      "passcodeDisable",
+      "nativeRepairProvide",
+      "passcodeStatus"
+    ],
+    "locked_passcode_required": [
+      "passcodeProvision",
+      "passcodeUnlock",
+      "passcodeChange",
+      "passcodeDisable",
+      "nativeRepairProvide",
+      "passcodeStatus"
+    ]
+  },
+  "g1Note": "G1（r2e 与 r2l 定稿，2026-11-20）：五个新命令 → not_ready；passcodeStatus 不新增断言，沿用 gate-state-v1 G1-NK-S2。",
+  "gatedWhenLocked": [
+    "ackInbound",
+    "clearIdentity",
+    "deriveSubkeys",
+    "ephemeralSign",
+    "gossipSign",
+    "historyAppend",
+    "historyClearCache",
+    "historyFullSync",
+    "historyImportBatch",
+    "historyListConversations",
+    "historyLoad",
+    "historyLoadOlder",
+    "historyOpenConversation",
+    "historyRead",
+    "historyReportLayout",
+    "historySign",
+    "historyVerifyImport",
+    "init",
+    "issueGroupRoster",
+    "issueGroupTombstone",
+    "mailboxCommand",
+    "nodesResponse",
+    "ownMailboxCommand",
+    "passcodeRun",
+    "pgpDecryptInbound",
+    "provisionIdentity",
+    "queryNativeWake",
+    "queryPresence",
+    "send",
+    "sendGroup",
+    "setNodes",
+    "setRoutes",
+    "voiceFrame",
+    "voiceListen",
+    "voiceUnlisten",
+    "walletAddress",
+    "walletSendTransaction",
+    "walletSignMessage",
+    "walletSignTypedData",
+    "walletSignUserOp",
+    "walletTransfer"
+  ],
+  "excludedNotGated": [
+    "deriveLocalKeys",
+    "fragmentKeys",
+    "identity.provision",
+    "pgpDecrypt",
+    "pgpSign",
+    "protocolKeys",
+    "signMessage"
+  ],
+  "envelopeNote": "门控命令在锁定态的信封为 {ok:false, error:\"locked\"}，不带 reason 字段（冻结件第四节第 119 行，locked 为既有码）。passcode_required 只出现在 walletStatus 的 notReadyReason 中（第七节 §7.3）。",
+  "counts": {
+    "six": 6,
+    "gated": 41,
+    "cases": 102
+  },
+  "cases": [
+    {
+      "id": "L-G0-passcodeProvision",
+      "state": "g0",
+      "command": "passcodeProvision",
+      "expect": {
+        "gate": "pass"
+      }
+    },
+    {
+      "id": "L-G0-passcodeUnlock",
+      "state": "g0",
+      "command": "passcodeUnlock",
+      "expect": {
+        "gate": "pass"
+      }
+    },
+    {
+      "id": "L-G0-passcodeChange",
+      "state": "g0",
+      "command": "passcodeChange",
+      "expect": {
+        "gate": "pass"
+      }
+    },
+    {
+      "id": "L-G0-passcodeDisable",
+      "state": "g0",
+      "command": "passcodeDisable",
+      "expect": {
+        "gate": "pass"
+      }
+    },
+    {
+      "id": "L-G0-nativeRepairProvide",
+      "state": "g0",
+      "command": "nativeRepairProvide",
+      "expect": {
+        "gate": "pass"
+      }
+    },
+    {
+      "id": "L-G0-passcodeStatus",
+      "state": "g0",
+      "command": "passcodeStatus",
+      "expect": {
+        "gate": "pass"
+      }
+    },
+    {
+      "id": "L-SIX-passcodeProvision",
+      "state": "locked_passcode_required",
+      "command": "passcodeProvision",
+      "expect": {
+        "gate": "pass"
+      }
+    },
+    {
+      "id": "L-SIX-passcodeUnlock",
+      "state": "locked_passcode_required",
+      "command": "passcodeUnlock",
+      "expect": {
+        "gate": "pass"
+      }
+    },
+    {
+      "id": "L-SIX-passcodeChange",
+      "state": "locked_passcode_required",
+      "command": "passcodeChange",
+      "expect": {
+        "gate": "pass"
+      }
+    },
+    {
+      "id": "L-SIX-passcodeDisable",
+      "state": "locked_passcode_required",
+      "command": "passcodeDisable",
+      "expect": {
+        "gate": "pass"
+      }
+    },
+    {
+      "id": "L-SIX-nativeRepairProvide",
+      "state": "locked_passcode_required",
+      "command": "nativeRepairProvide",
+      "expect": {
+        "gate": "pass"
+      }
+    },
+    {
+      "id": "L-SIX-passcodeStatus",
+      "state": "locked_passcode_required",
+      "command": "passcodeStatus",
+      "expect": {
+        "gate": "pass"
+      }
+    },
+    {
+      "id": "L-G1-passcodeProvision",
+      "state": "g1",
+      "command": "passcodeProvision",
+      "expect": {
+        "ok": false,
+        "error": "not_ready"
+      }
+    },
+    {
+      "id": "L-G1-passcodeUnlock",
+      "state": "g1",
+      "command": "passcodeUnlock",
+      "expect": {
+        "ok": false,
+        "error": "not_ready"
+      }
+    },
+    {
+      "id": "L-G1-passcodeChange",
+      "state": "g1",
+      "command": "passcodeChange",
+      "expect": {
+        "ok": false,
+        "error": "not_ready"
+      }
+    },
+    {
+      "id": "L-G1-passcodeDisable",
+      "state": "g1",
+      "command": "passcodeDisable",
+      "expect": {
+        "ok": false,
+        "error": "not_ready"
+      }
+    },
+    {
+      "id": "L-G1-nativeRepairProvide",
+      "state": "g1",
+      "command": "nativeRepairProvide",
+      "expect": {
+        "ok": false,
+        "error": "not_ready"
+      }
+    },
+    {
+      "id": "L-PTR-passcodeUnlock",
+      "state": "g2_pointer_empty",
+      "command": "passcodeUnlock",
+      "expect": {
+        "ok": false,
+        "error": "no_record"
+      },
+      "note": "r2l §二（第 15–20 行）：指针为空时 passcodeUnlock 只回 no_record"
+    },
+    {
+      "id": "L-LOCK-ackInbound",
+      "state": "locked_passcode_required",
+      "command": "ackInbound",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-clearIdentity",
+      "state": "locked_passcode_required",
+      "command": "clearIdentity",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-deriveSubkeys",
+      "state": "locked_passcode_required",
+      "command": "deriveSubkeys",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-ephemeralSign",
+      "state": "locked_passcode_required",
+      "command": "ephemeralSign",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-gossipSign",
+      "state": "locked_passcode_required",
+      "command": "gossipSign",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-historyAppend",
+      "state": "locked_passcode_required",
+      "command": "historyAppend",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-historyClearCache",
+      "state": "locked_passcode_required",
+      "command": "historyClearCache",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-historyFullSync",
+      "state": "locked_passcode_required",
+      "command": "historyFullSync",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-historyImportBatch",
+      "state": "locked_passcode_required",
+      "command": "historyImportBatch",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-historyListConversations",
+      "state": "locked_passcode_required",
+      "command": "historyListConversations",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-historyLoad",
+      "state": "locked_passcode_required",
+      "command": "historyLoad",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-historyLoadOlder",
+      "state": "locked_passcode_required",
+      "command": "historyLoadOlder",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-historyOpenConversation",
+      "state": "locked_passcode_required",
+      "command": "historyOpenConversation",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-historyRead",
+      "state": "locked_passcode_required",
+      "command": "historyRead",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-historyReportLayout",
+      "state": "locked_passcode_required",
+      "command": "historyReportLayout",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-historySign",
+      "state": "locked_passcode_required",
+      "command": "historySign",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-historyVerifyImport",
+      "state": "locked_passcode_required",
+      "command": "historyVerifyImport",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-init",
+      "state": "locked_passcode_required",
+      "command": "init",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-issueGroupRoster",
+      "state": "locked_passcode_required",
+      "command": "issueGroupRoster",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-issueGroupTombstone",
+      "state": "locked_passcode_required",
+      "command": "issueGroupTombstone",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-mailboxCommand",
+      "state": "locked_passcode_required",
+      "command": "mailboxCommand",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-nodesResponse",
+      "state": "locked_passcode_required",
+      "command": "nodesResponse",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-ownMailboxCommand",
+      "state": "locked_passcode_required",
+      "command": "ownMailboxCommand",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-passcodeRun",
+      "state": "locked_passcode_required",
+      "command": "passcodeRun",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-pgpDecryptInbound",
+      "state": "locked_passcode_required",
+      "command": "pgpDecryptInbound",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-provisionIdentity",
+      "state": "locked_passcode_required",
+      "command": "provisionIdentity",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-queryNativeWake",
+      "state": "locked_passcode_required",
+      "command": "queryNativeWake",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-queryPresence",
+      "state": "locked_passcode_required",
+      "command": "queryPresence",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-send",
+      "state": "locked_passcode_required",
+      "command": "send",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-sendGroup",
+      "state": "locked_passcode_required",
+      "command": "sendGroup",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-setNodes",
+      "state": "locked_passcode_required",
+      "command": "setNodes",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-setRoutes",
+      "state": "locked_passcode_required",
+      "command": "setRoutes",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-voiceFrame",
+      "state": "locked_passcode_required",
+      "command": "voiceFrame",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-voiceListen",
+      "state": "locked_passcode_required",
+      "command": "voiceListen",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-voiceUnlisten",
+      "state": "locked_passcode_required",
+      "command": "voiceUnlisten",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-walletAddress",
+      "state": "locked_passcode_required",
+      "command": "walletAddress",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-walletSendTransaction",
+      "state": "locked_passcode_required",
+      "command": "walletSendTransaction",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-walletSignMessage",
+      "state": "locked_passcode_required",
+      "command": "walletSignMessage",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-walletSignTypedData",
+      "state": "locked_passcode_required",
+      "command": "walletSignTypedData",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-walletSignUserOp",
+      "state": "locked_passcode_required",
+      "command": "walletSignUserOp",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-LOCK-walletTransfer",
+      "state": "locked_passcode_required",
+      "command": "walletTransfer",
+      "expect": {
+        "ok": false,
+        "error": "locked"
+      }
+    },
+    {
+      "id": "L-UNREAD-ackInbound",
+      "state": "locked_unreadable",
+      "command": "ackInbound",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-clearIdentity",
+      "state": "locked_unreadable",
+      "command": "clearIdentity",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-deriveSubkeys",
+      "state": "locked_unreadable",
+      "command": "deriveSubkeys",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-ephemeralSign",
+      "state": "locked_unreadable",
+      "command": "ephemeralSign",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-gossipSign",
+      "state": "locked_unreadable",
+      "command": "gossipSign",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-historyAppend",
+      "state": "locked_unreadable",
+      "command": "historyAppend",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-historyClearCache",
+      "state": "locked_unreadable",
+      "command": "historyClearCache",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-historyFullSync",
+      "state": "locked_unreadable",
+      "command": "historyFullSync",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-historyImportBatch",
+      "state": "locked_unreadable",
+      "command": "historyImportBatch",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-historyListConversations",
+      "state": "locked_unreadable",
+      "command": "historyListConversations",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-historyLoad",
+      "state": "locked_unreadable",
+      "command": "historyLoad",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-historyLoadOlder",
+      "state": "locked_unreadable",
+      "command": "historyLoadOlder",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-historyOpenConversation",
+      "state": "locked_unreadable",
+      "command": "historyOpenConversation",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-historyRead",
+      "state": "locked_unreadable",
+      "command": "historyRead",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-historyReportLayout",
+      "state": "locked_unreadable",
+      "command": "historyReportLayout",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-historySign",
+      "state": "locked_unreadable",
+      "command": "historySign",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-historyVerifyImport",
+      "state": "locked_unreadable",
+      "command": "historyVerifyImport",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-init",
+      "state": "locked_unreadable",
+      "command": "init",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-issueGroupRoster",
+      "state": "locked_unreadable",
+      "command": "issueGroupRoster",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-issueGroupTombstone",
+      "state": "locked_unreadable",
+      "command": "issueGroupTombstone",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-mailboxCommand",
+      "state": "locked_unreadable",
+      "command": "mailboxCommand",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-nodesResponse",
+      "state": "locked_unreadable",
+      "command": "nodesResponse",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-ownMailboxCommand",
+      "state": "locked_unreadable",
+      "command": "ownMailboxCommand",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-passcodeRun",
+      "state": "locked_unreadable",
+      "command": "passcodeRun",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-pgpDecryptInbound",
+      "state": "locked_unreadable",
+      "command": "pgpDecryptInbound",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-provisionIdentity",
+      "state": "locked_unreadable",
+      "command": "provisionIdentity",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-queryNativeWake",
+      "state": "locked_unreadable",
+      "command": "queryNativeWake",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-queryPresence",
+      "state": "locked_unreadable",
+      "command": "queryPresence",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-send",
+      "state": "locked_unreadable",
+      "command": "send",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-sendGroup",
+      "state": "locked_unreadable",
+      "command": "sendGroup",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-setNodes",
+      "state": "locked_unreadable",
+      "command": "setNodes",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-setRoutes",
+      "state": "locked_unreadable",
+      "command": "setRoutes",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-voiceFrame",
+      "state": "locked_unreadable",
+      "command": "voiceFrame",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-voiceListen",
+      "state": "locked_unreadable",
+      "command": "voiceListen",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-voiceUnlisten",
+      "state": "locked_unreadable",
+      "command": "voiceUnlisten",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-walletAddress",
+      "state": "locked_unreadable",
+      "command": "walletAddress",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-walletSendTransaction",
+      "state": "locked_unreadable",
+      "command": "walletSendTransaction",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-walletSignMessage",
+      "state": "locked_unreadable",
+      "command": "walletSignMessage",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-walletSignTypedData",
+      "state": "locked_unreadable",
+      "command": "walletSignTypedData",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-walletSignUserOp",
+      "state": "locked_unreadable",
+      "command": "walletSignUserOp",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-UNREAD-walletTransfer",
+      "state": "locked_unreadable",
+      "command": "walletTransfer",
+      "expect": {
+        "mustNotBe": {
+          "error": "locked"
+        }
+      }
+    },
+    {
+      "id": "L-WS-1",
+      "state": "locked_passcode_required",
+      "command": "walletStatus",
+      "expect": {
+        "status": "locked",
+        "notReadyReason": "passcode_required"
+      },
+      "note": "冻结件 §7.3（第 181 行）：有头且口令记录存在 → locked 且 notReadyReason passcode_required"
+    },
+    {
+      "id": "L-WS-2",
+      "state": "locked_unreadable",
+      "command": "walletStatus",
+      "expect": {
+        "status": "not_ready",
+        "notReadyReason": "unreadable"
+      },
+      "note": "口令态读不出：fail closed，原因码保持 unreadable，不得为 passcode_required（§7.3 第 182 行）"
+    }
+  ]
+}

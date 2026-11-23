@@ -28,8 +28,8 @@ final class BeamioNativeEthSignerTests: XCTestCase {
 		let v = try load()
 		XCTAssertEqual(v.sign.count, 15)
 		for (i, s) in v.sign.enumerated() {
-			XCTAssertEqual(BeamioNativeEthSigner.address(privateKeyHex: s.key), s.address, "address \(i)")
-			XCTAssertEqual(BeamioNativeEthSigner.signEip191(privateKeyHex: s.key, message: s.message), s.sig, "sig \(i)")
+			XCTAssertEqual(hexKeyAddress(s.key), s.address, "address \(i)")
+			XCTAssertEqual(hexKeySignEip191(s.key, message: s.message), s.sig, "sig \(i)")
 		}
 	}
 }

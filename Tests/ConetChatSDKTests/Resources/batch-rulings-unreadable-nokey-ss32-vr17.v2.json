@@ -1,0 +1,100 @@
+{
+  "vectorSet": "batch-rulings-unreadable-nokey-ss32-vr17",
+  "version": "v2",
+  "supersedes": "VECTOR-batch-rulings-unreadable-nokey-ss32-vr17-v1-2026-11-21.json 的 BR-01、BR-02、BR-03 形状（码与语义不变）",
+  "ruling": "n/a",
+  "status": "新文件（v2）；v1 原件不改",
+  "shapeRule": "动作类命令的门级拒绝为信封级 {type:'ack', reqId, ok:false, error:<code>}；unreadable 时同信封加 notReadyReason、unreadableCause、retryable。ok:true+result 只用于状态/存储类命令（v162 §182.2）。",
+  "cases": [
+    {
+      "id": "BR2-01-unreadable-no-pointer-init",
+      "state": {
+        "snapshot": "unreadable",
+        "osStatus": -34018,
+        "accountPointer": "absent"
+      },
+      "command": "init",
+      "expect": {
+        "type": "ack",
+        "ok": false,
+        "error": "not_ready",
+        "notReadyReason": "unreadable",
+        "unreadableCause": "entitlement",
+        "retryable": false
+      }
+    },
+    {
+      "id": "BR2-02-unreadable-no-pointer-walletSignMessage",
+      "state": {
+        "snapshot": "unreadable",
+        "osStatus": -25308,
+        "accountPointer": "absent"
+      },
+      "command": "walletSignMessage",
+      "expect": {
+        "type": "ack",
+        "ok": false,
+        "error": "not_ready",
+        "notReadyReason": "unreadable",
+        "unreadableCause": "device_locked",
+        "retryable": true
+      }
+    },
+    {
+      "id": "BR2-03-SS-32-readout-invalid-mnemonic-G0",
+      "state": {
+        "mnemonic": "read_and_confirmed_invalid",
+        "accountPointer": "absent",
+        "walletState": "G0"
+      },
+      "command": "init",
+      "expect": {
+        "type": "ack",
+        "ok": false,
+        "error": "no_key"
+      },
+      "note": "SS-32：读出且确认无效、无指针、G0 → 信封级 no_key（数据保留）。"
+    },
+    {
+      "id": "BR2-04-VR-17-lock-retains-voice-registration",
+      "state": {
+        "passcode": "locked",
+        "voiceRegistration": "present"
+      },
+      "command": "logout_or_none",
+      "expect": {
+        "voiceRegistration": "retained"
+      },
+      "note": "VR-17 按 69e0fa6；同 v1 BR-04，形状不变。"
+    },
+    {
+      "id": "BR2-05-cu06-gate-locked-accountCleanupOld",
+      "state": {
+        "gate": "locked",
+        "cleanupPending": true
+      },
+      "command": "accountCleanupOld",
+      "expect": "pending_android_qa8_shape",
+      "noDelete": true,
+      "note": "CU-06 门级 not_ready 且不删；答复形状以 Android qa.8 实际为准，待核定后写入。"
+    },
+    {
+      "id": "BR2-06-cu06-item-failure-after-gate",
+      "state": {
+        "gate": "passed",
+        "confirmed": true,
+        "deletionItemRead": "failed"
+      },
+      "command": "accountCleanupOld",
+      "expect": "pending_android_qa8_shape",
+      "note": "clear_incomplete＋cleanupPending 仅用于门通过后删除集合内单项失败；形状待核定。"
+    }
+  ],
+  "forbidden": [
+    "动作类门级拒绝答 ok:true",
+    "unreadable 或门未通过时答 no_key",
+    "SS-32 答 not_ready 或 unreadable",
+    "锁定时清除语音登记",
+    "门级锁定答 clear_incomplete"
+  ]
+}

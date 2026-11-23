@@ -57,7 +57,7 @@ public final class BeamioEntryPool {
 	private var cachedAt = Date.distantPast
 
 	private init() {
-		if let saved = UserDefaults.standard.dictionary(forKey: Self.cacheKey),
+		if let saved = BeamioDefaults.standard.dictionary(forKey: Self.cacheKey),
 		   let at = saved["at"] as? Double, let ips = saved["ips"] as? [String]
 		{
 			cached = ips
@@ -295,7 +295,7 @@ public final class BeamioEntryPool {
 			// IPs only (public node table entries): no wallet, no identity.
 			cached = Array(ready.keys)
 			cachedAt = Date()
-			UserDefaults.standard.set(["at": cachedAt.timeIntervalSince1970, "ips": cached], forKey: Self.cacheKey)
+			BeamioDefaults.standard.set(["at": cachedAt.timeIntervalSince1970, "ips": cached], forKey: Self.cacheKey)
 		}
 		// Retire old or broken pre-opened connections.
 		var retired: [NWConnection] = []

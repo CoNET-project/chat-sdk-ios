@@ -1,0 +1,132 @@
+{
+  "vectorSet": "unreadable-cause",
+  "version": "v3",
+  "supersedes": "VECTOR-unreadable-cause-v2-2026-11-21.json（UNR2-01、UNR2-03 的即时终态改动；v2 原件不改）",
+  "authority": "v162 第 182.2 节与 VECTOR-shell-record-read-answer-shape-v1",
+  "status": "新文件（v3）；v2 不改",
+  "causes": {
+    "entitlement": {
+      "retryable": false,
+      "examples": [
+        "-34018"
+      ]
+    },
+    "device_locked": {
+      "retryable": true,
+      "examples": [
+        "-25308"
+      ]
+    },
+    "other": {
+      "retryable": false,
+      "examples": []
+    }
+  },
+  "cases": [
+    {
+      "id": "UNR2-01-entitlement-34018",
+      "state": {
+        "keychainItem": "unreadable",
+        "osStatus": -34018
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "error",
+          "sub": "not_ready_persistent",
+          "notReadyReason": "unreadable",
+          "retryable": false,
+          "unreadableCause": "entitlement"
+        }
+      },
+      "note": "v3：retryable=false 立即终态"
+    },
+    {
+      "id": "UNR2-02-device_locked-25308",
+      "state": {
+        "keychainItem": "unreadable",
+        "osStatus": -25308
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "not_ready",
+          "notReadyReason": "unreadable",
+          "unreadableCause": "device_locked",
+          "retryable": true
+        }
+      }
+    },
+    {
+      "id": "UNR2-03-other",
+      "state": {
+        "keychainItem": "unreadable",
+        "osStatus": -50
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "error",
+          "sub": "not_ready_persistent",
+          "notReadyReason": "unreadable",
+          "retryable": false,
+          "unreadableCause": "other"
+        }
+      },
+      "note": "v3：retryable=false 立即终态"
+    },
+    {
+      "id": "UNR2-04-persistent-entitlement-after-10",
+      "state": {
+        "sameProcessConsecutiveSameReason": 10,
+        "reason": "unreadable",
+        "unreadableCause": "entitlement"
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "error",
+          "sub": "not_ready_persistent",
+          "notReadyReason": "unreadable",
+          "unreadableCause": "entitlement",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "UNR2-05-absent-control",
+      "state": {
+        "keychainItem": "absent",
+        "pageRecord": "absent"
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "absent"
+        }
+      },
+      "note": "SHAPE-01 形状。"
+    }
+  ],
+  "forbidden": [
+    "unreadableCause 含钥串内容或原始错误文本",
+    "entitlement 的 retryable 为 true；device_locked 的 retryable 为 false；other 的 retryable 为 true",
+    "unreadable 答为信封级 ok:false"
+  ],
+  "basis": "提交：unreadable 且 retryable=false 立即回 not_ready_persistent；v243 第 263.2 节",
+  "closedUnreadableCause": [
+    "entitlement",
+    "device_locked",
+    "other"
+  ]
+}

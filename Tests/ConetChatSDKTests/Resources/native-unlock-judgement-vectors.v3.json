@@ -1,0 +1,202 @@
+{
+  "file": "native-unlock-judgement-vectors.v3.json",
+  "schema": "native-unlock-judgement vectors v2 (new file; v1 unchanged). Adds nativeLocked cases for G1 and no-passcode accounts.",
+  "spec": "v43 §47 (passcodeStatus.nativeLocked; nativeIdentityCheck ack shape)",
+  "generatedAtUtc": "2026-11-20",
+  "passcodeStatusCases": [
+    {
+      "id": "NL-1",
+      "reply": {
+        "set": true,
+        "locked": "device-level",
+        "hasKey": true,
+        "walletState": "present",
+        "nativeLocked": false
+      },
+      "expectPageNativeUnlocked": true
+    },
+    {
+      "id": "NL-2",
+      "reply": {
+        "set": true,
+        "locked": "device-level",
+        "hasKey": true,
+        "walletState": "present",
+        "nativeLocked": true
+      },
+      "expectPageNativeUnlocked": false
+    },
+    {
+      "id": "NL-3",
+      "reply": {
+        "set": true,
+        "locked": "device-level",
+        "hasKey": true,
+        "walletState": "present"
+      },
+      "expectPageNativeUnlocked": false,
+      "note": "nativeLocked missing -> locked (fail closed)"
+    },
+    {
+      "id": "NL-4",
+      "reply": {
+        "set": true,
+        "locked": "device-level",
+        "hasKey": true,
+        "walletState": "present",
+        "nativeLocked": "false"
+      },
+      "expectPageNativeUnlocked": false,
+      "note": "non-boolean string -> locked"
+    },
+    {
+      "id": "NL-5",
+      "reply": {
+        "set": true,
+        "locked": "device-level",
+        "hasKey": true,
+        "walletState": "present",
+        "nativeLocked": 0
+      },
+      "expectPageNativeUnlocked": false,
+      "note": "non-boolean number -> locked"
+    },
+    {
+      "id": "NL-6",
+      "reply": {
+        "error": "timeout"
+      },
+      "expectPageNativeUnlocked": false,
+      "note": "error or timeout -> locked"
+    },
+    {
+      "id": "NL-7",
+      "reply": {
+        "set": true,
+        "locked": "device-level",
+        "hasKey": true,
+        "walletState": "present",
+        "nativeLocked": false,
+        "walletState_is_present_only": true
+      },
+      "expectPageNativeUnlocked": true,
+      "note": "walletState never used as judgement"
+    },
+    {
+      "id": "NL-8",
+      "state": "G1",
+      "keyRecordReadable": true,
+      "passcodeSet": false,
+      "reply": {
+        "set": false,
+        "nativeLocked": true
+      },
+      "expectPageNativeUnlocked": false,
+      "note": "G1 with readable key record -> nativeLocked true (fail closed; v45 50.2)"
+    },
+    {
+      "id": "NL-9",
+      "state": "G1",
+      "keyRecordReadable": true,
+      "passcodeSet": true,
+      "reply": {
+        "set": true,
+        "nativeLocked": true
+      },
+      "expectPageNativeUnlocked": false,
+      "note": "G1 with passcode set -> nativeLocked true"
+    },
+    {
+      "id": "NL-10",
+      "state": "nonG1",
+      "keyRecordReadable": true,
+      "passcodeSet": false,
+      "reply": {
+        "set": false,
+        "nativeLocked": false
+      },
+      "expectPageNativeUnlocked": true,
+      "note": "non-G1, no passcode, record readable -> nativeLocked false"
+    },
+    {
+      "id": "NL-11",
+      "state": "nonG1",
+      "keyRecordReadable": false,
+      "passcodeSet": false,
+      "reply": {
+        "set": false,
+        "nativeLocked": true
+      },
+      "expectPageNativeUnlocked": false,
+      "note": "non-G1, no passcode, record unreadable -> nativeLocked true"
+    }
+  ],
+  "identityCheckCases": [
+    {
+      "id": "IC-1",
+      "request": {
+        "eoa": "0x1111111111111111111111111111111111111111"
+      },
+      "nativeState": "unlocked_same_mnemonic",
+      "reply": {
+        "ok": true,
+        "match": true
+      }
+    },
+    {
+      "id": "IC-2",
+      "request": {
+        "eoa": "0x2222222222222222222222222222222222222222"
+      },
+      "nativeState": "unlocked_different_mnemonic",
+      "reply": {
+        "ok": true,
+        "match": false
+      },
+      "note": "enter account-conflict flow (eoa_mismatch), no data clear, no overwrite"
+    },
+    {
+      "id": "IC-3",
+      "request": {
+        "eoa": "0x1111111111111111111111111111111111111111"
+      },
+      "nativeState": "locked",
+      "reply": {
+        "ok": false,
+        "error": "not_ready",
+        "reason": "passcode_not_provided"
+      }
+    },
+    {
+      "id": "IC-4",
+      "request": {},
+      "nativeState": "unlocked",
+      "reply": {
+        "ok": false,
+        "error": "bad_request"
+      }
+    },
+    {
+      "id": "IC-5",
+      "request": {
+        "eoa": "not-an-address"
+      },
+      "nativeState": "unlocked",
+      "reply": {
+        "ok": false,
+        "error": "bad_request"
+      }
+    }
+  ],
+  "shapeRules": [
+    "ok always present",
+    "match only when ok==true",
+    "error only when ok==false",
+    "no mnemonic/private key/passcode/derived secret in any field"
+  ],
+  "limitations": [
+    "Vectors are shape and judgement only; they do not exercise the native mnemonic comparison itself.",
+    "Not committed to the spec branch (branch frozen)."
+  ],
+  "supersedes": "native-unlock-judgement-vectors.v2.json（原件不改）；IC-3（locked，无 bundle）改为 not_ready + reason=passcode_not_provided；来电只看绑定与当前指针账户（v257）"
+}

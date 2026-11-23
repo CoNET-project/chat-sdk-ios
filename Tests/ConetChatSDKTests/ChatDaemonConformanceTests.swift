@@ -7,9 +7,14 @@ import XCTest
 /// vectors the TS Worker and chat-sdk-android test against.
 ///
 /// Run on a simulator (crypto runs in WKWebView):
-///   xcodebuild test -scheme ConetChatSDK -destination 'platform=iOS Simulator,name=iPhone 17'
+/// xcodebuild test -scheme ConetChatSDK -destination 'platform=iOS Simulator,name=iPhone 17'
 @MainActor
 final class ChatDaemonConformanceTests: XCTestCase {
+	override func setUp() {
+		super.setUp()
+		NativeAccountPointerIsolation.begin()
+	}
+
 	private static var cached: [String: Any]?
 
 	private var vectors: [String: Any] {
@@ -55,18 +60,22 @@ final class ChatDaemonConformanceTests: XCTestCase {
 		XCTAssertEqual(result["protocolVersion"] as? Int, ios["protocolVersion"] as? Int)
 		XCTAssertEqual(result["minProtocolVersion"] as? Int, ios["minProtocolVersion"] as? Int)
 		XCTAssertEqual(result["implementation"] as? String, "ios")
-		XCTAssertEqual(result["capabilities"] as? [String], ios["capabilities"] as? [String])
-		for cap in BeamioConetChatProtocol.capabilities {
+		// (QA only): the QA candidate declares exactly the approved QA capabilities on top of the spec list (BEAMIO_QA_BUILD, for
+			// identity.route-register.native.v1). Outside QA the extra list is empty, so the comparison is the spec list as before.
+			let qaExtra = BeamioConetChatProtocol.qaCapabilities
+			XCTAssertEqual(result["capabilities"] as? [String], (ios["capabilities"] as? [String] ?? []) + qaExtra)
+		for cap in BeamioConetChatProtocol.capabilities where !qaExtra.contains(cap) {
 			XCTAssertTrue(all.contains(cap), "\(cap) is not a spec capability")
 		}
 		let version = try XCTUnwrap(result["sdkVersion"] as? String)
-		XCTAssertNotNil(version.range(of: #"^\d+\.\d+\.\d+$"#, options: .regularExpression))
+		XCTAssertNotNil(version.range(of: #"^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$"#, options: .regularExpression), "X.Y.Z with an optional release suffix")
 	}
 
 	func testModuleAnswersHelloAndUnknownCommands() async throws {
 		var events: [[String: Any]] = []
-		let done = expectation(description: "two acks")
-		done.expectedFulfillmentCount = 2
+		// Three requests, three answers, one each. reqId -1 is not valid: it is answered bad_request with reqId null.
+		let done = expectation(description: "three acks")
+		done.expectedFulfillmentCount = 3
 		let emit: BeamioConetChatModule.WebEmit = { payload in
 			guard let event = payload["event"] as? [String: Any], event["type"] as? String == "ack" else { return }
 			events.append(event)
@@ -81,7 +90,11 @@ final class ChatDaemonConformanceTests: XCTestCase {
 		assertJsonEqual(hello["result"], BeamioConetChatProtocol.helloResult(), "hello result")
 		let unknown = try XCTUnwrap(events.first { $0["reqId"] as? Int == 42 })
 		XCTAssertEqual(unknown["ok"] as? Bool, false)
+		// The name is not in the command table: unknown_command, judged before the gate in every state.
 		XCTAssertEqual(unknown["error"] as? String, "unknown_command")
+		let invalid = try XCTUnwrap(events.first { $0["reqId"] is NSNull })
+		XCTAssertEqual(invalid["error"] as? String, "bad_request")
+		XCTAssertEqual(events.count, 3, "one answer per request")
 	}
 
 	// MARK: - call signals
@@ -139,6 +152,11 @@ final class ChatDaemonConformanceTests: XCTestCase {
 
 	func testAckHashes() async throws {
 		let cases = try XCTUnwrap(try vectors["ackHash"] as? [[String: String]])
+		// The first call starts the host's page. On a cold simulator the first boot can outlast the 3 s boot timeout (the host then resets and the
+		// second boot is ready). Warm the host up first, so the vectors judge the hash and not the cold start.
+		for _ in 0..<3 {
+			if (try? await call { done in host.keccakUtf8("warm-up", completion: done) }) != nil { break }
+		}
 		for c in cases {
 			let armor = try XCTUnwrap(c["armor"])
 			let hash: String = try await call { done in host.keccakUtf8(armor, completion: done) }
@@ -149,21 +167,32 @@ final class ChatDaemonConformanceTests: XCTestCase {
 	func testEip191SignAndRecover() async throws {
 		let wallet = try XCTUnwrap(try keys()["wallet"])
 		let key = try XCTUnwrap(wallet["privateKey"]).replacingOccurrences(of: "0x", with: "")
-		let address: String = try await call { done in host.walletAddress(privateKeyHex: key, completion: done) }
-		XCTAssertEqual(address, wallet["address"]?.lowercased())
+		// r3: signing and the address come from the native signer, not from the WebView.
+		let address = try XCTUnwrap(hexKeyAddress(key))
+		XCTAssertEqual(address.lowercased(), wallet["address"]?.lowercased())
 		let cases = try XCTUnwrap(try vectors["eip191"] as? [[String: String]])
 		for c in cases {
 			let message = try XCTUnwrap(c["message"])
-			let sig: String = try await call { done in host.signEip191(privateKeyHex: key, message: message, completion: done) }
+			let sig = try XCTUnwrap(hexKeySignEip191(key, message: message))
 			XCTAssertEqual(sig, c["signature"], message)
 			let signer: String = try await call { done in host.verifyMessage(text: message, signature: sig, completion: done) }
 			XCTAssertEqual(signer.lowercased(), c["signer"]?.lowercased(), message)
 		}
 	}
 
+	/// Decrypts an envelope with the native OpenPGP layer (X-19, gopenpgp v3.5.2): the production decrypt of this branch (25.52 r3). The
+	/// private armor is the vector's own test key, read from the vector file, never from storage and never from a WebView. Nothing is logged.
+	/// macOS test builds do not link X-19: the case is skipped there; the iOS simulator runs it.
 	private func decrypt(_ armor: String, with which: String) async throws -> (text: String, armorHash: String) {
-		let priv = try XCTUnwrap(try keys()[which]?["privateArmored"])
-		return try await call { done in host.decryptInboundArmor(privateKeyArmor: priv, armor: armor, completion: done) }
+		try XCTSkipUnless(BeamioPGPNative.linked, "X-19 is not linked in this build (macOS test build); the iOS simulator runs this case")
+		let privateArmor = try XCTUnwrap(try keys()[which]?["privateArmored"], "the vector key \(which)")
+		switch BeamioPGPNative.decryptArmoredText(privateArmor: privateArmor, armoredMessage: armor) {
+		case .plain(let plain):
+			return (String(decoding: plain, as: UTF8.self), BeamioConetChatListenSession.armorHash(armor))
+		case .notUTF8, .failed:
+			XCTFail("the native decrypt of \(which) failed")
+			throw NSError(domain: "ChatDaemonConformanceTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "native decrypt failed"])
+		}
 	}
 
 	private func decodeLiteral(_ text: String, _ encoding: String) throws -> Any {
@@ -212,4 +241,10 @@ final class ChatDaemonConformanceTests: XCTestCase {
 		let workOut = try await decrypt(workArmor, with: "routePgp")
 		assertJsonEqual(try json(workOut.text), work, "wrapArmorToMailboxWork")
 	}
+
+	override func tearDown() {
+		NativeAccountPointerIsolation.end()
+		super.tearDown()
+	}
+
 }

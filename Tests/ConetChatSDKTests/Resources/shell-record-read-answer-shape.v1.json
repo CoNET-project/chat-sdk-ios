@@ -1,0 +1,191 @@
+{
+  "vectorSet": "shell-record-read-answer-shape",
+  "version": "v1",
+  "spec": "PROTOCOL-incoming-call-unlock-overlay-proposal-addendum-29-draft-v162-2026-11-21.md#182",
+  "frozenBasis": "interface/spec.md §25.52D.6 表及注；§25.52E.2；§25.52K.4",
+  "status": "新文件（草案）；不改任何既有向量；不改冻结件",
+  "envelopeRule": {
+    "rejection": "拒绝类（origin_refused、bad_request、key_over_bridge_refused）：信封级 {type:\"ack\", reqId, ok:false, error}",
+    "stateAndStorage": "状态类（absent、migrating、too_large、ok）与存储类（error + sub）：{type:\"ack\", reqId, ok:true, result:{code, ...}}",
+    "storageErrorShape": "result.code 为 \"error\"，result.sub 为具体子码"
+  },
+  "cases": [
+    {
+      "id": "SHAPE-01-absent",
+      "state": {
+        "pageRecord": "absent",
+        "legacyStore": "absent_or_empty"
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "absent"
+        }
+      },
+      "note": "全新安装（iOS 新线签名构建）：ok:true 加 result.code absent。仅 status=absent 的应答不符合规格。"
+    },
+    {
+      "id": "SHAPE-02-loaded",
+      "state": {
+        "pageRecord": "present"
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "ok",
+          "rev": "<int>",
+          "schemaVersion": "<int>",
+          "record": "<object>"
+        }
+      }
+    },
+    {
+      "id": "SHAPE-03-migrating",
+      "state": {
+        "importInProgress": true
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "migrating"
+        }
+      }
+    },
+    {
+      "id": "SHAPE-04-not_ready-storage_locked",
+      "state": {
+        "storageDerivedLock": true
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "not_ready",
+          "notReadyReason": "storage_locked",
+          "retryable": false
+        }
+      },
+      "note": "v159/v160 原写为信封级 ok:false error:not_ready，与分界不符，以本向量为准。"
+    },
+    {
+      "id": "SHAPE-05-not_ready-g1_uninitialized",
+      "state": {
+        "g1Session": "not_established"
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "not_ready",
+          "notReadyReason": "g1_uninitialized",
+          "retryable": true
+        }
+      }
+    },
+    {
+      "id": "SHAPE-06-not_ready-ambiguous_accounts",
+      "state": {
+        "keyCount": 2,
+        "accountPointer": "empty"
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "not_ready",
+          "notReadyReason": "ambiguous_accounts",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "SHAPE-07-unreadable-entitlement",
+      "state": {
+        "osStatus": -34018
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "not_ready",
+          "notReadyReason": "unreadable",
+          "unreadableCause": "entitlement",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "SHAPE-08-not_ready_persistent",
+      "state": {
+        "sameProcessConsecutiveSameReason": 10,
+        "reason": "storage_locked"
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "error",
+          "sub": "not_ready_persistent",
+          "notReadyReason": "storage_locked",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "SHAPE-09-record_unreadable",
+      "state": {
+        "pageRecord": "unreadable"
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "error",
+          "sub": "record_unreadable"
+        }
+      }
+    },
+    {
+      "id": "SHAPE-10-origin_refused",
+      "state": {
+        "origin": "untrusted"
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": false,
+        "error": "origin_refused"
+      }
+    },
+    {
+      "id": "SHAPE-11-bad_request-extra-field",
+      "state": {
+        "extraField": "x"
+      },
+      "command": "shellRecordRead",
+      "expect": {
+        "type": "ack",
+        "ok": false,
+        "error": "bad_request"
+      }
+    }
+  ],
+  "forbidden": [
+    "状态类与存储类使用 status 顶层字段（非 result.code）",
+    "absent 不带 result.code",
+    "存储类答为信封级 ok:false",
+    "拒绝类答为 ok:true"
+  ]
+}

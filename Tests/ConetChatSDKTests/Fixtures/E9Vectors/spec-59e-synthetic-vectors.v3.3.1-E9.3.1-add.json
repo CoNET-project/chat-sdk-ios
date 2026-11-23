@@ -1,0 +1,229 @@
+{
+  "file": "spec-59e-synthetic-vectors.v3.3.1-E9.3.1-add.json",
+  "scope": "ios-shell-encrypted-copy-second-tier-synthetic",
+  "status": "pending_review",
+  "extends": "spec-59e-errata-v3.3.1-E9.3.md (E93-01..04 provisional), spec-59e-errata-v3.3.1-E9.3.1.md",
+  "replaces": {
+    "E93-01": "finalized (provisional -> decided)",
+    "E93-02": "finalized (provisional -> decided)",
+    "E93-03": "finalized (provisional -> decided)",
+    "E93-04": "finalized (provisional -> decided)"
+  },
+  "decision_source": "裁定 2026-11-17 (E9.3.1)",
+  "tier_order": [
+    "pwa_current_valid",
+    "native_current_record_second_tier (mnemonic:<eoa> and iOS shell encrypted copy, same position)",
+    "native_sealed_copy_third_tier"
+  ],
+  "fixtures_note": "Synthetic only. ACCOUNT_X and ACCOUNT_Y are synthetic EOAs. PWA has no valid mnemonic in all cases below unless stated. The pending marker is wallet.sync.marker (phase pending) with target. Sealed copies are never consulted while second-tier answer is unknown.",
+  "cases": [
+    {
+      "id": "E93-01",
+      "title": "（定稿）PWA 无；壳侧加密副本含有效助记词（ACCOUNT_X），mnemonic:<eoa> 无 → 第二顺位接回 ACCOUNT_X",
+      "policy": "decided",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native_second_tier": {
+          "mnemonic:<eoa>": "absent",
+          "shell_encrypted_copy": {
+            "mnemonicPhrase": "VALID",
+            "eoa": "ACCOUNT_X",
+            "read": "ok"
+          }
+        }
+      },
+      "op": {
+        "command": "resolve_mnemonic_source"
+      },
+      "expect": {
+        "answer": "valid_reconnect",
+        "returned_account": "ACCOUNT_X",
+        "source_used": "native_second_tier_shell_encrypted_copy",
+        "sealed_copy_consulted": false,
+        "deleted": []
+      },
+      "source": "E9.3.1-1、E9.3.1-2 第 1 行"
+    },
+    {
+      "id": "E93-02",
+      "title": "（定稿）壳侧加密副本读取失败，且不属于本次未完成写入 → unknown，不跳到封存副本（副本中有有效助记词也不取）",
+      "policy": "decided",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native_second_tier": {
+          "mnemonic:<eoa>": "absent",
+          "shell_encrypted_copy": {
+            "read": "failed"
+          },
+          "wallet.sync.marker": "absent"
+        },
+        "sealed_copy": {
+          "valid": true,
+          "eoa": "ACCOUNT_Y"
+        }
+      },
+      "op": {
+        "command": "resolve_mnemonic_source"
+      },
+      "expect": {
+        "answer": "unknown",
+        "returned_account": null,
+        "sealed_copy_consulted": false,
+        "onboarding_entered": false,
+        "deleted": [],
+        "retry": true
+      },
+      "source": "E9.3.1-2 第 4 行"
+    },
+    {
+      "id": "E93-03",
+      "title": "（定稿）壳侧加密副本读取失败，被 wallet.sync.marker(pending) 标识为本次未完成写入 → 忽略；其余第二顺位与第三顺位确认没有 → onboarding",
+      "policy": "decided",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native_second_tier": {
+          "mnemonic:<eoa>": "absent",
+          "shell_encrypted_copy": {
+            "read": "failed"
+          },
+          "wallet.sync.marker": {
+            "phase": "pending",
+            "target": "shell_encrypted_copy"
+          }
+        },
+        "sealed_copies": [
+          {
+            "valid": false,
+            "confirmed_empty": true
+          }
+        ]
+      },
+      "op": {
+        "command": "resolve_mnemonic_source"
+      },
+      "expect": {
+        "answer": "onboarding",
+        "half_write_read_failure_ignored": true,
+        "deleted": [],
+        "files": {
+          "wallet.sync.marker": "retained",
+          "shell_encrypted_copy": "retained"
+        }
+      },
+      "source": "E9.3.1-2 第 3 行；E9.1-1 a"
+    },
+    {
+      "id": "E93-04",
+      "title": "（定稿）壳侧加密副本无 mnemonicPhrase 字段（或为空）→ 计为确认没有；其余确认没有 → onboarding",
+      "policy": "decided",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native_second_tier": {
+          "mnemonic:<eoa>": "absent",
+          "shell_encrypted_copy": {
+            "mnemonicPhrase": "absent_or_empty",
+            "read": "ok"
+          }
+        },
+        "sealed_copies": [
+          {
+            "valid": false,
+            "confirmed_empty": true
+          }
+        ]
+      },
+      "op": {
+        "command": "resolve_mnemonic_source"
+      },
+      "expect": {
+        "answer": "onboarding",
+        "deleted": []
+      },
+      "source": "E9.3.1-2 第 2 行"
+    },
+    {
+      "id": "E93-05",
+      "title": "（新增）第二顺位同位冲突：mnemonic:<eoa> 与壳侧加密副本都有效，账户不同（ACCOUNT_X 与 ACCOUNT_Y）→ unknown，保留，可重试，不擅自选择",
+      "policy": "decided",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native_second_tier": {
+          "mnemonic:<eoa>": {
+            "valid": true,
+            "eoa": "ACCOUNT_X"
+          },
+          "shell_encrypted_copy": {
+            "mnemonicPhrase": "VALID",
+            "eoa": "ACCOUNT_Y",
+            "read": "ok"
+          }
+        }
+      },
+      "op": {
+        "command": "resolve_mnemonic_source"
+      },
+      "expect": {
+        "answer": "unknown",
+        "returned_account": null,
+        "sealed_copy_consulted": false,
+        "onboarding_entered": false,
+        "deleted": [],
+        "retry": true
+      },
+      "source": "E9.3.1-3 第 1 行"
+    },
+    {
+      "id": "E93-06",
+      "title": "（新增）第二顺位同位：mnemonic:<eoa> 与壳侧加密副本都有效，账户相同（ACCOUNT_X）→ valid，回传 ACCOUNT_X",
+      "policy": "decided",
+      "pre": {
+        "pwa": {
+          "valid_mnemonic": false,
+          "read": "ok"
+        },
+        "native_second_tier": {
+          "mnemonic:<eoa>": {
+            "valid": true,
+            "eoa": "ACCOUNT_X"
+          },
+          "shell_encrypted_copy": {
+            "mnemonicPhrase": "VALID",
+            "eoa": "ACCOUNT_X",
+            "read": "ok"
+          }
+        }
+      },
+      "op": {
+        "command": "resolve_mnemonic_source"
+      },
+      "expect": {
+        "answer": "valid_reconnect",
+        "returned_account": "ACCOUNT_X",
+        "conflict": false,
+        "deleted": []
+      },
+      "source": "E9.3.1-3 第 2 行"
+    }
+  ],
+  "open_items": [
+    "iOS REC 原名未确认，E91-07 待到件后定稿（E9.3.1-5）",
+    "Android 键名与 Android 壳侧副本情形待 Android SDK核对（E9.3.1-4）"
+  ],
+  "not_pinned": true,
+  "not_in_spec": true
+}

@@ -68,6 +68,12 @@ public final class BeamioConetChatListenSession {
 		onStatus: @escaping StatusHandler,
 		onInbound: @escaping InboundHandler
 	) {
+		// (a): the native inbound layer is closed (`BeamioPGPNative.available` = false). Every start and every resume ends here,
+		// so no mailbox connection, no listen-auth signature and no "listening" status happen while it is closed.
+		guard BeamioPGPNative.available else {
+			onStatus("blocked", BeamioPGPNative.pendingCode)
+			return
+		}
 		lock.lock()
 		generation += 1
 		let gen = generation
@@ -103,6 +109,23 @@ public final class BeamioConetChatListenSession {
 		return running && generation == gen && !paused
 	}
 
+	/// The detail of a `reconnecting` status: one of the fixed codes this file throws, or nil. Any other error, a
+	/// free-text message from a lower layer, is not sent.
+	static func statusDetail(for error: Error) -> String? {
+		let e = error as NSError
+		guard e.domain == "BeamioConetChatListen",
+		      let code = e.userInfo[NSLocalizedDescriptionKey] as? String,
+		      listenStatusCodes.contains(code)
+		else { return nil }
+		return code
+	}
+
+	/// The fixed codes of this file's errors. `all_entries_failed` replaces the free text of the last entry error.
+	static let listenStatusCodes: Set<String> = [
+		"missing_own_route", "stream_key", "bad_command", "no_entry_c", "encrypt_route_command_failed", "wrap_timeout",
+		"all_entries_failed",
+	]
+
 	private func listenLoop(
 		session: BeamioConetChatModule.Session,
 		gen: Int,
@@ -111,16 +134,26 @@ public final class BeamioConetChatListenSession {
 	) {
 		var failures = 0
 		while stillAlive(gen: gen) {
+			// J1: a storage-derived lock ends the run, not a retry: the signature gate would refuse every attempt.
+			if BeamioNativeWallet.storageDerivedLocked(eoa: session.eoa) {
+				endForStorageLock(gen: gen, onStatus: onStatus)
+				return
+			}
 			var reopenNow = false
 			let tryStarted = Date()
 			do {
 				reopenNow = try runOneListen(session: session, gen: gen, onStatus: onStatus, onInbound: onInbound)
 			} catch {
 				if stillAlive(gen: gen) {
-					onStatus("reconnecting", error.localizedDescription)
+					onStatus("reconnecting", BeamioConetChatListenSession.statusDetail(for: error))
 				}
 			}
 			if !stillAlive(gen: gen) { break }
+			// J1: a lock during the attempt ends the run now, not after the backoff.
+			if BeamioNativeWallet.storageDerivedLocked(eoa: session.eoa) {
+				endForStorageLock(gen: gen, onStatus: onStatus)
+				return
+			}
 			// The mailbox answered on this try: the network works, start the backoff over.
 			if reopenNow || heardMailbox(since: tryStarted) { failures = 0 } else { failures += 1 }
 			onStatus("reconnecting", reopenNow ? "relisten" : "retry")
@@ -134,6 +167,35 @@ public final class BeamioConetChatListenSession {
 			waitBeforeRetry(wait)
 		}
 	}
+
+	/// J1: the storage-derived lock arrived during a run. The run stops, the signer for this account is dropped, and the status
+	/// says why (`idle`, detail `locked`, the same shape as the passcode lock). Only the run that is still current does this.
+	func endForStorageLock(gen: Int, onStatus: @escaping StatusHandler) {
+		lock.lock()
+		let current = running && generation == gen
+		if current {
+			running = false
+			generation += 1
+		}
+		lock.unlock()
+		guard current else { return }
+		stopCurrentSse()
+		retryNow()
+		BeamioConetChatSignBroker.clearSigner()
+		onStatus("idle", "locked")
+	}
+
+#if BEAMIO_TEST_HOOKS
+	/// Test build only: marks a run as started without the gate, so the stop path can be exercised. Returns its generation.
+	@discardableResult
+	func markRunningForTests() -> Int {
+		lock.lock(); defer { lock.unlock() }
+		generation += 1
+		running = true
+		paused = false
+		return generation
+	}
+#endif
 
 	private let retrySignal = NSCondition()
 	private var retryKicked = false
@@ -196,7 +258,7 @@ public final class BeamioConetChatListenSession {
 			])
 		}
 
-		let sign = try awaitSign(cmdJson)
+		let sign = try awaitSign(cmdJson, eoa: session.eoa)
 		let innerArmor = try awaitEncryptSignedRoute(message: cmdJson, signature: sign, route: ownRoute)
 		guard stillAlive(gen: gen) else { return false }
 
@@ -210,7 +272,6 @@ public final class BeamioConetChatListenSession {
 			])
 		}
 
-		var lastError: String?
 		for entry in entries {
 			guard stillAlive(gen: gen) else { return false }
 			guard let entryIp = BeamioSiCipherPost.normalizeIp(entry.ip),
@@ -218,11 +279,16 @@ public final class BeamioConetChatListenSession {
 			      let url = BeamioSiCipherPost.postUrl(for: entryIp)
 			else { continue }
 
+			// No entry key, or a wrap that fails: the entry is skipped. The inner armor is never sent to an entry unwrapped
+			//.
+			guard entry.armoredPublicKey.contains("BEGIN PGP PUBLIC KEY") else {
+				continue
+			}
 			let armored: String
-			if entry.armoredPublicKey.contains("BEGIN PGP PUBLIC KEY") {
-				armored = (try? awaitWrap(inner: innerArmor, entryRoute: entry.armoredPublicKey)) ?? innerArmor
-			} else {
-				armored = innerArmor
+			do {
+				armored = try awaitWrap(inner: innerArmor, entryRoute: entry.armoredPublicKey)
+			} catch {
+				continue
 			}
 
 			NSLog("[BeamioConetChat] mailbox_listen entry=%@ domain=%@ route=%@", entryIp, entry.domain, routeKeyId.isEmpty ? "?" : routeKeyId)
@@ -238,7 +304,6 @@ public final class BeamioConetChatListenSession {
 				onInbound: onInbound
 			)
 			if err == nil { return false }
-			lastError = err
 			if err == "root_stop" || !stillAlive(gen: gen) { return false }
 			// The mailbox registered this listen under its instanceId. Reusing this
 			// command on another entry lets the old socket's late close remove the
@@ -246,7 +311,7 @@ public final class BeamioConetChatListenSession {
 			if heardMailbox(since: streamStarted) { return true }
 		}
 		throw NSError(domain: "BeamioConetChatListen", code: -4, userInfo: [
-			NSLocalizedDescriptionKey: lastError ?? "all_entries_failed",
+			NSLocalizedDescriptionKey: "all_entries_failed",
 		])
 	}
 
@@ -415,35 +480,59 @@ public final class BeamioConetChatListenSession {
 		onFailure: (() -> Void)? = nil,
 		onLine: @escaping (_ line: String, _ armorHash: String) -> Void
 	) {
-		BeamioOpenPgpHost.shared.decryptInboundArmor(
-			privateKeyArmor: session.pgpPrivateKeyArmored,
-			armor: armored
-		) { result in
-			switch result {
-			case .failure:
-				NSLog("[BeamioConetChat] inbound decrypt failed")
+		// (QA build): the account's PGP private key stays in the native store. `BeamioNativeWallet.pgpDecrypt` reads it and returns only
+		// the plaintext; the armor and the plaintext never go to the WebView, and nothing here logs either.
+		switch BeamioNativeWallet.pgpDecrypt(eoa: session.eoa, message: Data(armored.utf8)) {
+		case .failure(let failure):
+			// Failure: nothing is delivered, stored or acked, so the mailbox sends the frame again. `onFailure` reopens the stream at
+			// most every 30 s (restartAfterDecryptFailure).
+			NSLog("[BeamioConetChat] inbound decrypt failed: %@", decryptFailureLabel(failure))
+			onFailure?()
+		case .success(let plain):
+			guard let text = String(data: plain, encoding: .utf8) else {
+				NSLog("[BeamioConetChat] inbound decrypt failed: plaintext_not_utf8")
 				onFailure?()
-			case .success(let dec):
-				var line = normalizeInboundPlaintext(dec.text)
-				if line.isEmpty { return }
-				if var env = jsonObject(line) {
-					env["_beamioPgpArmorHash"] = dec.armorHash
-					if let data = try? JSONSerialization.data(withJSONObject: env),
-					   let s = String(data: data, encoding: .utf8) {
-						line = s
-					}
-				}
-				onLine(line, dec.armorHash)
+				return
 			}
+			var line = normalizeInboundPlaintext(text)
+			// An empty plaintext has nothing to deliver: no line, no failure (the frame is not acked, as before).
+			if line.isEmpty { return }
+			let hash = armorHash(armored)
+			if var env = jsonObject(line) {
+				env["_beamioPgpArmorHash"] = hash
+				if let data = try? JSONSerialization.data(withJSONObject: env), let s = String(data: data, encoding: .utf8) {
+					line = s
+				}
+			}
+			// Success: the line goes on; the store and the ack happen only after the frame is verified and stored (acceptVerifiedInbound).
+			onLine(line, hash)
+		}
+	}
+
+	/// The armor hash of a mailbox frame: `0x` + keccak256 of the armor text (UTF-8), lower case. The chat-daemon vectors define it so.
+	static func armorHash(_ armored: String) -> String {
+		"0x" + BeamioNativeEthSigner.keccak256(Array(armored.utf8)).map { String(format: "%02x", $0) }.joined()
+	}
+
+	/// The label of a decrypt failure for the log: the case and its fixed code, never a payload.
+	private static func decryptFailureLabel(_ failure: BeamioNativeWallet.Failure) -> String {
+		switch failure {
+		case .walletKeyMissing: return "wallet_key_missing"
+		case .locked: return "locked"
+		case .rejected(let code): return code
+		case .signFailed: return "sign_failed"
+		case .pending(let code): return code
+		case .storageUnreadable: return "storage_unreadable"
 		}
 	}
 
 	// MARK: - Crypto helpers (sync wrappers)
 
-	private func awaitSign(_ message: String) throws -> String {
+	/// The listen authentication: signed for the session's account by the listen-auth path only.
+	private func awaitSign(_ message: String, eoa: String) throws -> String {
 		let sem = DispatchSemaphore(value: 0)
 		var out: Result<String, Error> = .failure(NSError(domain: "sign", code: -1))
-		BeamioConetChatSignBroker.requestEip191(message: message) { result in
+		BeamioConetChatSignBroker.requestListenAuth(eoa: eoa, message: message) { result in
 			out = result
 			sem.signal()
 		}
@@ -472,9 +561,12 @@ public final class BeamioConetChatListenSession {
 		return armor
 	}
 
+	/// The wrapped armor, or a thrown error. A timeout is an error: it is never answered with the inner armor.
 	private func awaitWrap(inner: String, entryRoute: String) throws -> String {
 		let sem = DispatchSemaphore(value: 0)
-		var out: Result<String, Error> = .success(inner)
+		var out: Result<String, Error> = .failure(NSError(domain: "BeamioConetChatListen", code: -5, userInfo: [
+			NSLocalizedDescriptionKey: "wrap_timeout",
+		]))
 		BeamioOpenPgpHost.shared.wrapArmorToEntryRoute(
 			innerArmor: inner,
 			entryRoutePublicArmor: entryRoute
@@ -482,7 +574,9 @@ public final class BeamioConetChatListenSession {
 			out = result
 			sem.signal()
 		}
-		_ = sem.wait(timeout: .now() + 15)
+		guard sem.wait(timeout: .now() + 15) == .success else {
+			throw NSError(domain: "BeamioConetChatListen", code: -5, userInfo: [NSLocalizedDescriptionKey: "wrap_timeout"])
+		}
 		return try out.get()
 	}
 

@@ -1,0 +1,2413 @@
+{
+  "file": "voice-ephemeral-register-vectors.v1.json",
+  "spec": "v1.1- §25.52GK（依 §25.43.7、§25.21 的 W7-DEV 条件、§25.26.4c、§25.52CP.2、§25.52AT.1）",
+  "generator": "gen-voice-ephemeral-register-vectors.mjs",
+  "purpose": "语音临时密钥 T 的登记命令 voiceEphemeralRegister（T1，table-T 64 名）与 W7 ephemeralSign 的 sid 查找规则。合成数据，只用于测试。",
+  "fixture": {
+    "nowSec": 1762000000,
+    "maxTtlSec": 86400,
+    "sid1": "0123456789abcdef0123456789abcdef",
+    "sid2": "fedcba9876543210fedcba9876543210",
+    "wk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+    "relayKeyId": "relay-key-1"
+  },
+  "envelope": {
+    "request": "JSON 对象 {action, reqId, args}；action 为 voiceEphemeralRegister 或 ephemeralSign。",
+    "ack": "{type:\"ack\", action, reqId, ok:true, result} 或 {type:\"ack\", action, reqId, ok:false, error}",
+    "ephemeralSignResult": "{temp, tempSig}；temp 为 T 的地址（小写）；tempSig 为 EIP-191(T, text)。"
+  },
+  "rules": {
+    "order": "判定次序（§25.52AT.1）：信封与 reqId；门控（no_key、not_ready、locked）；入参校验（bad_request）；执行。门控不读 payload。",
+    "sid": "32 位小写十六进制（§25.43.7）。不合格为 bad_request，先于登记查找。",
+    "expiresAt": "整数（unix 秒），须大于 nowSec，且不超过 nowSec + 86400（GK.3）。",
+    "idempotent": "同 sid、同 expiresAt、未过期：ok，返回同一 temp，不生成新钥。同 sid 其它情形：sid_exists，既有登记不变。",
+    "result": "voiceEphemeralRegister 的 result 只含 sid、temp、expiresAt。私钥、派生材料、tk 均不出现。",
+    "clear": "登记在以下时刻清除：会话结束（destroy、G2→G1）、口令锁定、clearIdentity、切换账户、进程重启。过期即失效，不复活。",
+    "w7": "ephemeralSign 在 G2 下查找登记：未登记、已过期或已清除为 unknown_channel（§25.43.7）；门控先于查找。",
+    "tempSig": "tempSig 为 EIP-191(T, signedText)，其中 signedText 为 \"conet.voice.sse.listen.v3|\" + sid + \"|\" + wk + \"|\" + upper(relayKeyId) + \"|\" + decimal(timestamp)；恢复地址须等于 temp。",
+    "seal": "voiceEphemeralSeal（§25.52GL）：入参 {sid, recipientPgpPublicArmored}；应答 {sid, sealed}，sealed 为收件方 PGP 公钥加密的 tk 密文（\"-----BEGIN PGP MESSAGE-----\"）。门控先于入参校验；入参校验（sid 格式、收件方公钥形状）先于登记查找；登记查找先于封装；封装失败为 seal_failed。每次封装得到新密文；不产生事件；tk 明文与私钥不出原生。"
+  },
+  "stepOps": {
+    "advanceTime": "将 nowSec 增加 seconds。",
+    "destroy": "会话结束：G2 → G1，清除登记。",
+    "lock": "口令锁定：清除登记；此后 G2 下的 voiceEphemeralRegister 与 ephemeralSign 为 locked。",
+    "unlock": "口令解锁：仍为 G2，登记已清除。",
+    "clearIdentity": "清除原生钥记录：G → G0，清除登记。",
+    "restoreAndInit": "导入或恢复成功（G0 → G1），随后 init 与记录一致（G1 → G2）。登记为空。",
+    "reinit": "G1 下 init，EOA 与记录一致（G1 → G2）。登记为空。",
+    "accountSwitch": "切换到另一账户：G2 → G1，清除登记。",
+    "restart": "进程重启：内存中的登记与会话清除；记录保留，状态为 G1。"
+  },
+  "comparison": "键集相等：ack 与 result 的键集合须与 ackKeys、resultKeys 完全相等；不得多出字段。tempEqualsStep / tempDiffersFromStep 指向同一用例中较早的步骤。recoverTo 与 signedText 为签名校验项。payloadRead 为 false 时，门控拒绝前不得读取 payload。",
+  "cases": [
+    {
+      "id": "VR-01",
+      "title": "G2 登记成功：应答只含公开材料（sid、temp、expiresAt），temp 为地址；不含任何私钥或派生材料字段",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr01-r",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr01-r",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address"
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-02",
+      "title": "同 sid 同 expiresAt 再次登记：幂等，返回同一 temp，不生成新钥",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr02-a",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr02-a",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address"
+          }
+        },
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr02-b",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr02-b",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address",
+            "tempEqualsStep": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-03",
+      "title": "同 sid 不同 expiresAt：sid_exists，既有登记不变（后续 W7 仍用原 temp）",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr03-a",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr03-a",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address"
+          }
+        },
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr03-b",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000700
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr03-b",
+              "ok": false,
+              "error": "sid_exists"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "noStateChange": true
+          }
+        },
+        {
+          "op": "request",
+          "action": "ephemeralSign",
+          "reqId": "vr03-c",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "wk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+            "relayKeyId": "relay-key-1",
+            "timestamp": 1762000000
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "ephemeralSign",
+              "reqId": "vr03-c",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "temp",
+              "tempSig"
+            ],
+            "tempFormat": "address",
+            "tempSigFormat": "signature",
+            "recoverTo": "temp",
+            "signedText": "conet.voice.sse.listen.v3|0123456789abcdef0123456789abcdef|AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=|RELAY-KEY-1|1762000000",
+            "tempEqualsStep": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-04",
+      "title": "sid 大写：bad_request（格式不合格）",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr04",
+          "args": {
+            "sid": "0123456789ABCDEF0123456789ABCDEF",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr04",
+              "ok": false,
+              "error": "bad_request"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "noStateChange": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-05",
+      "title": "sid 长度 31：bad_request",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr05",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcde",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr05",
+              "ok": false,
+              "error": "bad_request"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "noStateChange": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-06",
+      "title": "expiresAt 等于 nowSec：bad_request（须大于 nowSec）",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr06",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000000
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr06",
+              "ok": false,
+              "error": "bad_request"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "noStateChange": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-07",
+      "title": "expiresAt 超过 nowSec + 86400：bad_request（上限 24 小时）",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr07",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762086401
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr07",
+              "ok": false,
+              "error": "bad_request"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "noStateChange": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-08",
+      "title": "expiresAt 为字符串：bad_request（须为整数）",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr08",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": "1762000600"
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr08",
+              "ok": false,
+              "error": "bad_request"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "noStateChange": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-09",
+      "title": "expiresAt 等于 nowSec + 86400：边界，ok",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr09",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762086400
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr09",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762086400
+            },
+            "tempFormat": "address"
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-10",
+      "title": "G0（无原生钥记录）：no_key，不读 payload，不登记",
+      "initial": {
+        "gate": "G0"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr10",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr10",
+              "ok": false,
+              "error": "no_key"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "payloadRead": false,
+            "noStateChange": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-11",
+      "title": "G1（有记录，未 init）：not_ready，不读 payload，不登记",
+      "initial": {
+        "gate": "G1"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr11",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr11",
+              "ok": false,
+              "error": "not_ready"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "payloadRead": false,
+            "noStateChange": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-12",
+      "title": "口令锁定（G2 且已锁）：locked，不登记（与 W7 同属口令锁族，§25.52CP.2）",
+      "initial": {
+        "gate": "G2",
+        "afterInit": [
+          {
+            "op": "lock"
+          }
+        ]
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr12",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr12",
+              "ok": false,
+              "error": "locked"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "payloadRead": false,
+            "noStateChange": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-13",
+      "title": "G0 且入参不合格：no_key（门控先于入参校验，GK.2）",
+      "initial": {
+        "gate": "G0"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr13",
+          "args": {
+            "sid": "XYZ",
+            "expiresAt": "x"
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr13",
+              "ok": false,
+              "error": "no_key"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "payloadRead": false,
+            "noStateChange": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-14",
+      "title": "W7：未登记的 sid：unknown_channel（25.43.7）",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "ephemeralSign",
+          "reqId": "vr14",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "wk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+            "relayKeyId": "relay-key-1",
+            "timestamp": 1762000000
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "ephemeralSign",
+              "reqId": "vr14",
+              "ok": false,
+              "error": "unknown_channel"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-15",
+      "title": "W7：登记过期后 unknown_channel；过期登记不复活，同 sid 重新登记得到新 temp",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr15-a",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr15-a",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address"
+          }
+        },
+        {
+          "op": "advanceTime",
+          "seconds": 601
+        },
+        {
+          "op": "request",
+          "action": "ephemeralSign",
+          "reqId": "vr15-b",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "wk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+            "relayKeyId": "relay-key-1",
+            "timestamp": 1762000601
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "ephemeralSign",
+              "reqId": "vr15-b",
+              "ok": false,
+              "error": "unknown_channel"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ]
+          }
+        },
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr15-c",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762001201
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr15-c",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762001201
+            },
+            "tempFormat": "address",
+            "tempDiffersFromStep": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-16",
+      "title": "W7：会话结束（destroy）后为 not_ready（门控先于查找）；重新 init 后同 sid 为 unknown_channel",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr16-a",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr16-a",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address"
+          }
+        },
+        {
+          "op": "destroy"
+        },
+        {
+          "op": "request",
+          "action": "ephemeralSign",
+          "reqId": "vr16-b",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "wk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+            "relayKeyId": "relay-key-1",
+            "timestamp": 1762000000
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "ephemeralSign",
+              "reqId": "vr16-b",
+              "ok": false,
+              "error": "not_ready"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "payloadRead": false
+          }
+        },
+        {
+          "op": "reinit"
+        },
+        {
+          "op": "request",
+          "action": "ephemeralSign",
+          "reqId": "vr16-c",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "wk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+            "relayKeyId": "relay-key-1",
+            "timestamp": 1762000000
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "ephemeralSign",
+              "reqId": "vr16-c",
+              "ok": false,
+              "error": "unknown_channel"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-17",
+      "title": "W7：口令锁定为 locked；解锁后同 sid 为 unknown_channel（锁定清除登记，GK.4）",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr17-a",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr17-a",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address"
+          }
+        },
+        {
+          "op": "lock"
+        },
+        {
+          "op": "request",
+          "action": "ephemeralSign",
+          "reqId": "vr17-b",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "wk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+            "relayKeyId": "relay-key-1",
+            "timestamp": 1762000000
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "ephemeralSign",
+              "reqId": "vr17-b",
+              "ok": false,
+              "error": "locked"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "payloadRead": false
+          }
+        },
+        {
+          "op": "unlock"
+        },
+        {
+          "op": "request",
+          "action": "ephemeralSign",
+          "reqId": "vr17-c",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "wk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+            "relayKeyId": "relay-key-1",
+            "timestamp": 1762000000
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "ephemeralSign",
+              "reqId": "vr17-c",
+              "ok": false,
+              "error": "unknown_channel"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-18",
+      "title": "W7：clearIdentity 后为 no_key；导入恢复并 init 后同 sid 为 unknown_channel",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr18-a",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr18-a",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address"
+          }
+        },
+        {
+          "op": "clearIdentity"
+        },
+        {
+          "op": "request",
+          "action": "ephemeralSign",
+          "reqId": "vr18-b",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "wk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+            "relayKeyId": "relay-key-1",
+            "timestamp": 1762000000
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "ephemeralSign",
+              "reqId": "vr18-b",
+              "ok": false,
+              "error": "no_key"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "payloadRead": false
+          }
+        },
+        {
+          "op": "restoreAndInit"
+        },
+        {
+          "op": "request",
+          "action": "ephemeralSign",
+          "reqId": "vr18-c",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "wk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+            "relayKeyId": "relay-key-1",
+            "timestamp": 1762000000
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "ephemeralSign",
+              "reqId": "vr18-c",
+              "ok": false,
+              "error": "unknown_channel"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-19",
+      "title": "W7：切换账户后为 not_ready；账户 B 的 init 后 A 的 sid 为 unknown_channel；B 下同 sid 重新登记得到新 temp",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr19-a",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr19-a",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address"
+          }
+        },
+        {
+          "op": "accountSwitch"
+        },
+        {
+          "op": "request",
+          "action": "ephemeralSign",
+          "reqId": "vr19-b",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "wk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+            "relayKeyId": "relay-key-1",
+            "timestamp": 1762000000
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "ephemeralSign",
+              "reqId": "vr19-b",
+              "ok": false,
+              "error": "not_ready"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "payloadRead": false
+          }
+        },
+        {
+          "op": "reinit"
+        },
+        {
+          "op": "request",
+          "action": "ephemeralSign",
+          "reqId": "vr19-c",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "wk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+            "relayKeyId": "relay-key-1",
+            "timestamp": 1762000000
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "ephemeralSign",
+              "reqId": "vr19-c",
+              "ok": false,
+              "error": "unknown_channel"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ]
+          }
+        },
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr19-d",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr19-d",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address",
+            "tempDiffersFromStep": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-20",
+      "title": "W7：进程重启后登记丢失：重启后 not_ready；init 后 unknown_channel（登记仅在内存中）",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr20-a",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr20-a",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address"
+          }
+        },
+        {
+          "op": "restart"
+        },
+        {
+          "op": "request",
+          "action": "ephemeralSign",
+          "reqId": "vr20-b",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "wk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+            "relayKeyId": "relay-key-1",
+            "timestamp": 1762000000
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "ephemeralSign",
+              "reqId": "vr20-b",
+              "ok": false,
+              "error": "not_ready"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "payloadRead": false
+          }
+        },
+        {
+          "op": "reinit"
+        },
+        {
+          "op": "request",
+          "action": "ephemeralSign",
+          "reqId": "vr20-c",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "wk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+            "relayKeyId": "relay-key-1",
+            "timestamp": 1762000000
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "ephemeralSign",
+              "reqId": "vr20-c",
+              "ok": false,
+              "error": "unknown_channel"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-21",
+      "title": "W7：已登记且未过期：ok；temp 与登记一致；签名可恢复到 temp；文本与 25.43.7 一致",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr21-a",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr21-a",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address"
+          }
+        },
+        {
+          "op": "request",
+          "action": "ephemeralSign",
+          "reqId": "vr21-b",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "wk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+            "relayKeyId": "relay-key-1",
+            "timestamp": 1762000000
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "ephemeralSign",
+              "reqId": "vr21-b",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "temp",
+              "tempSig"
+            ],
+            "tempFormat": "address",
+            "tempSigFormat": "signature",
+            "recoverTo": "temp",
+            "signedText": "conet.voice.sse.listen.v3|0123456789abcdef0123456789abcdef|AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=|RELAY-KEY-1|1762000000",
+            "tempEqualsStep": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-22",
+      "title": "W7：sid 大写（即使小写已登记）：bad_request，格式先于登记查找",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr22-a",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr22-a",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address"
+          }
+        },
+        {
+          "op": "request",
+          "action": "ephemeralSign",
+          "reqId": "vr22-b",
+          "args": {
+            "sid": "0123456789ABCDEF0123456789ABCDEF",
+            "wk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+            "relayKeyId": "relay-key-1",
+            "timestamp": 1762000000
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "ephemeralSign",
+              "reqId": "vr22-b",
+              "ok": false,
+              "error": "bad_request"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-23",
+      "title": "两个 sid 各自独立登记：W7 分别返回各自的 temp，互不影响",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr23-a",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr23-a",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address"
+          }
+        },
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr23-b",
+          "args": {
+            "sid": "fedcba9876543210fedcba9876543210",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr23-b",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "fedcba9876543210fedcba9876543210",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address",
+            "tempDiffersFromStep": 0
+          }
+        },
+        {
+          "op": "request",
+          "action": "ephemeralSign",
+          "reqId": "vr23-c",
+          "args": {
+            "sid": "fedcba9876543210fedcba9876543210",
+            "wk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+            "relayKeyId": "relay-key-1",
+            "timestamp": 1762000000
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "ephemeralSign",
+              "reqId": "vr23-c",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "temp",
+              "tempSig"
+            ],
+            "tempFormat": "address",
+            "tempSigFormat": "signature",
+            "recoverTo": "temp",
+            "signedText": "conet.voice.sse.listen.v3|fedcba9876543210fedcba9876543210|AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=|RELAY-KEY-1|1762000000",
+            "tempEqualsStep": 2
+          }
+        },
+        {
+          "op": "request",
+          "action": "ephemeralSign",
+          "reqId": "vr23-d",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "wk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+            "relayKeyId": "relay-key-1",
+            "timestamp": 1762000000
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "ephemeralSign",
+              "reqId": "vr23-d",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "temp",
+              "tempSig"
+            ],
+            "tempFormat": "address",
+            "tempSigFormat": "signature",
+            "recoverTo": "temp",
+            "signedText": "conet.voice.sse.listen.v3|0123456789abcdef0123456789abcdef|AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=|RELAY-KEY-1|1762000000",
+            "tempEqualsStep": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-24",
+      "title": "G2 已登记：voiceEphemeralSeal 应答 sealed（PGP 密文）与 sid；只出密文",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr24-a",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr24-a",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address"
+          }
+        },
+        {
+          "op": "request",
+          "action": "voiceEphemeralSeal",
+          "reqId": "vr24-b",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "recipientPgpPublicArmored": "$FIXTURE.recipientPgpOk"
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralSeal",
+              "reqId": "vr24-b",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "sealed",
+              "sid"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef"
+            },
+            "sealedFormat": "pgpMessage"
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-25",
+      "title": "voiceEphemeralSeal：未登记的 sid：unknown_channel",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralSeal",
+          "reqId": "vr25",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "recipientPgpPublicArmored": "$FIXTURE.recipientPgpOk"
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralSeal",
+              "reqId": "vr25",
+              "ok": false,
+              "error": "unknown_channel"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-26",
+      "title": "voiceEphemeralSeal：收件方公钥形状不合格：bad_request（先于登记查找）",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr26-a",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr26-a",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address"
+          }
+        },
+        {
+          "op": "request",
+          "action": "voiceEphemeralSeal",
+          "reqId": "vr26-b",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "recipientPgpPublicArmored": "not-armor"
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralSeal",
+              "reqId": "vr26-b",
+              "ok": false,
+              "error": "bad_request"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-27",
+      "title": "voiceEphemeralSeal：G0：no_key，不读 payload",
+      "initial": {
+        "gate": "G0"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralSeal",
+          "reqId": "vr27",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "recipientPgpPublicArmored": "$FIXTURE.recipientPgpOk"
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralSeal",
+              "reqId": "vr27",
+              "ok": false,
+              "error": "no_key"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "payloadRead": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-28",
+      "title": "voiceEphemeralSeal：G1：not_ready，不读 payload",
+      "initial": {
+        "gate": "G1"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralSeal",
+          "reqId": "vr28",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "recipientPgpPublicArmored": "$FIXTURE.recipientPgpOk"
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralSeal",
+              "reqId": "vr28",
+              "ok": false,
+              "error": "not_ready"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "payloadRead": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-29",
+      "title": "voiceEphemeralSeal：口令锁定：locked，不读 payload",
+      "initial": {
+        "gate": "G2",
+        "afterInit": [
+          {
+            "op": "lock"
+          }
+        ]
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralSeal",
+          "reqId": "vr29",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "recipientPgpPublicArmored": "$FIXTURE.recipientPgpOk"
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralSeal",
+              "reqId": "vr29",
+              "ok": false,
+              "error": "locked"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "payloadRead": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-30",
+      "title": "voiceEphemeralSeal：登记过期后：unknown_channel",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr30-a",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr30-a",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address"
+          }
+        },
+        {
+          "op": "advanceTime",
+          "seconds": 601
+        },
+        {
+          "op": "request",
+          "action": "voiceEphemeralSeal",
+          "reqId": "vr30-b",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "recipientPgpPublicArmored": "$FIXTURE.recipientPgpOk"
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralSeal",
+              "reqId": "vr30-b",
+              "ok": false,
+              "error": "unknown_channel"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-31",
+      "title": "voiceEphemeralSeal：会话结束后 not_ready；重新 init 后同 sid 为 unknown_channel",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr31-a",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr31-a",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address"
+          }
+        },
+        {
+          "op": "destroy"
+        },
+        {
+          "op": "request",
+          "action": "voiceEphemeralSeal",
+          "reqId": "vr31-b",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "recipientPgpPublicArmored": "$FIXTURE.recipientPgpOk"
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralSeal",
+              "reqId": "vr31-b",
+              "ok": false,
+              "error": "not_ready"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "payloadRead": false
+          }
+        },
+        {
+          "op": "reinit"
+        },
+        {
+          "op": "request",
+          "action": "voiceEphemeralSeal",
+          "reqId": "vr31-c",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "recipientPgpPublicArmored": "$FIXTURE.recipientPgpOk"
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralSeal",
+              "reqId": "vr31-c",
+              "ok": false,
+              "error": "unknown_channel"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-32",
+      "title": "voiceEphemeralSeal：同一 sid 两次封装得到不同密文（每次新随机数）",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr32-a",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr32-a",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address"
+          }
+        },
+        {
+          "op": "request",
+          "action": "voiceEphemeralSeal",
+          "reqId": "vr32-b",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "recipientPgpPublicArmored": "$FIXTURE.recipientPgpOk"
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralSeal",
+              "reqId": "vr32-b",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "sealed",
+              "sid"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef"
+            },
+            "sealedFormat": "pgpMessage"
+          }
+        },
+        {
+          "op": "request",
+          "action": "voiceEphemeralSeal",
+          "reqId": "vr32-c",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "recipientPgpPublicArmored": "$FIXTURE.recipientPgpOk"
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralSeal",
+              "reqId": "vr32-c",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "sealed",
+              "sid"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef"
+            },
+            "sealedFormat": "pgpMessage",
+            "sealedDiffersFromStep": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-33",
+      "title": "voiceEphemeralSeal：sid 大写（即使小写已登记）：bad_request",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr33-a",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr33-a",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address"
+          }
+        },
+        {
+          "op": "request",
+          "action": "voiceEphemeralSeal",
+          "reqId": "vr33-b",
+          "args": {
+            "sid": "0123456789ABCDEF0123456789ABCDEF",
+            "recipientPgpPublicArmored": "$FIXTURE.recipientPgpOk"
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralSeal",
+              "reqId": "vr33-b",
+              "ok": false,
+              "error": "bad_request"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-34",
+      "title": "voiceEphemeralSeal：形状合格但无法解析的收件方公钥：seal_failed；不产生密文，登记保留",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralRegister",
+          "reqId": "vr34-a",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "expiresAt": 1762000600
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralRegister",
+              "reqId": "vr34-a",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "expiresAt",
+              "sid",
+              "temp"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef",
+              "expiresAt": 1762000600
+            },
+            "tempFormat": "address"
+          }
+        },
+        {
+          "op": "request",
+          "action": "voiceEphemeralSeal",
+          "reqId": "vr34-b",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "recipientPgpPublicArmored": "$FIXTURE.recipientPgpBroken"
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralSeal",
+              "reqId": "vr34-b",
+              "ok": false,
+              "error": "seal_failed"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ],
+            "noStateChange": true
+          }
+        },
+        {
+          "op": "request",
+          "action": "voiceEphemeralSeal",
+          "reqId": "vr34-c",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "recipientPgpPublicArmored": "$FIXTURE.recipientPgpOk"
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralSeal",
+              "reqId": "vr34-c",
+              "ok": true
+            },
+            "ackKeys": [
+              "action",
+              "ok",
+              "reqId",
+              "result",
+              "type"
+            ],
+            "resultKeys": [
+              "sealed",
+              "sid"
+            ],
+            "result": {
+              "sid": "0123456789abcdef0123456789abcdef"
+            },
+            "sealedFormat": "pgpMessage"
+          }
+        }
+      ]
+    },
+    {
+      "id": "VR-35",
+      "title": "voiceEphemeralSeal：未登记的 sid 且收件方公钥形状不合格：bad_request（入参校验先于登记查找）",
+      "initial": {
+        "gate": "G2"
+      },
+      "steps": [
+        {
+          "op": "request",
+          "action": "voiceEphemeralSeal",
+          "reqId": "vr35",
+          "args": {
+            "sid": "0123456789abcdef0123456789abcdef",
+            "recipientPgpPublicArmored": "not-armor"
+          },
+          "expect": {
+            "ack": {
+              "type": "ack",
+              "action": "voiceEphemeralSeal",
+              "reqId": "vr35",
+              "ok": false,
+              "error": "bad_request"
+            },
+            "ackKeys": [
+              "action",
+              "error",
+              "ok",
+              "reqId",
+              "type"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "counts": {
+    "cases": 35,
+    "steps": 80,
+    "requests": 66
+  },
+  "notCovered": [
+    "真实随机数与 secp256k1 的有效性：由各端原生测试覆盖；本文件只校验地址形状与签名恢复。",
+    "两端实现：本文件给出共同期望，iOS 与 Android 须各自运行并回报。",
+    "$FIXTURE.* 引用的测试公钥须由各端测试装载（合成测试钥匙，不是真实密钥）；本文件只校验形状与错误码。",
+    "封装所得密文不含 tk 明文：须由各端原生测试以已知测试钥解密核对；本文件不能校验明文不出现。"
+  ]
+}

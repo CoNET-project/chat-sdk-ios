@@ -1,0 +1,141 @@
+{
+  "schema": "shell-record-passcode-not-provided.v1",
+  "date": "2026-11-22",
+  "status": "NEW FILE. Supersedes the shellRecord locked answers in the iOS handoff (storage_locked / write_failed) for passcode accounts.",
+  "basis": "305.4 裁定（v285 的 shellRecordRead、shellRecordWrite 纳入）；（不以 storage_locked／write_failed 表示应用级口令状态）；的 notReadyPasscodeNotProvided",
+  "note": "合成数据。真实存储故障仍按 storage_unreadable 或 unknown 回报，保留数据。",
+  "cases": [
+    {
+      "id": "SRP-01-read-passcode-account-no-passcode-not_ready",
+      "command": "shellRecordRead",
+      "state": {
+        "passcodeAccount": true,
+        "passcodeProvided": false
+      },
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "not_ready",
+          "notReadyReason": "passcode_not_provided",
+          "retryable": true
+        }
+      },
+      "notStorageLocked": true
+    },
+    {
+      "id": "SRP-02-write-passcode-account-no-passcode-not_ready",
+      "command": "shellRecordWrite",
+      "state": {
+        "passcodeAccount": true,
+        "passcodeProvided": false
+      },
+      "expect": {
+        "type": "ack",
+        "ok": false,
+        "error": "not_ready",
+        "notReadyReason": "passcode_not_provided",
+        "retryable": true
+      },
+      "notWriteFailed": true,
+      "dataWritten": false
+    },
+    {
+      "id": "SRP-03-read-storage-fault-storage_unreadable",
+      "command": "shellRecordRead",
+      "state": {
+        "passcodeAccount": false,
+        "storageFault": true
+      },
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "error",
+          "sub": "storage_unreadable"
+        }
+      },
+      "notPasscodeNotProvided": true,
+      "dataKept": true
+    },
+    {
+      "id": "SRP-04-write-storage-fault-storage_unreadable",
+      "command": "shellRecordWrite",
+      "state": {
+        "passcodeAccount": false,
+        "storageFault": true
+      },
+      "expect": {
+        "type": "ack",
+        "ok": false,
+        "error": "storage_unreadable"
+      },
+      "notPasscodeNotProvided": true,
+      "dataKept": true
+    },
+    {
+      "id": "SRP-05-read-unknown-state-unknown",
+      "command": "shellRecordRead",
+      "state": {
+        "stateUnknown": true
+      },
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "unknown"
+        }
+      },
+      "notPasscodeNotProvided": true,
+      "dataKept": true
+    },
+    {
+      "id": "SRP-06-passcode-provided-read-ok-no-not_ready",
+      "command": "shellRecordRead",
+      "state": {
+        "passcodeAccount": true,
+        "passcodeProvided": true,
+        "unlocked": true
+      },
+      "expect": {
+        "type": "ack",
+        "ok": true,
+        "result": {
+          "code": "ok"
+        }
+      },
+      "notPasscodeNotProvided": true
+    },
+    {
+      "id": "SRP-07-storage_locked-not-used-for-app-passcode",
+      "command": "shellRecordRead",
+      "state": {
+        "passcodeAccount": true,
+        "passcodeProvided": false
+      },
+      "expect": {
+        "forbiddenCodes": [
+          "storage_locked",
+          "write_failed"
+        ]
+      }
+    },
+    {
+      "id": "SRP-08-preread-not-affected",
+      "command": "nativeMnemonicPreread",
+      "state": {
+        "passcodeAccount": true,
+        "passcodeProvided": false
+      },
+      "expect": {
+        "allowedCodes": [
+          "ok",
+          "confirmed_missing",
+          "unknown",
+          "read_error"
+        ],
+        "passcodeNotProvidedAllowed": false
+      }
+    }
+  ]
+}
