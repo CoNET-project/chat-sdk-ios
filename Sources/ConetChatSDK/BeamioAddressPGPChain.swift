@@ -1,7 +1,7 @@
 import Foundation
 
 /// The read-only chain source of P-IMP-PGP. Two view calls on AddressPGP, at one block:
-/// `_pgpKeys(address)` → (pgpKeyID, publicKeyArmored, encrypKeyArmored, exists) no sender needed
+/// `_pgpKeys(address)` → (pgpKeyID, publicKeyArmored, encrypKeyArmored, exists) no sender needed. `publicKeyArmored` is the armor or its base64 text; the snapshot always holds bare armor.
 /// `getEncryptedPrivateKey` → the encrypted backup, read from msg.sender, so `from` must be the account
 /// Only `eth_blockNumber` and `eth_call` are sent, over https. No write method exists in this file. The contract address,
 /// the chain and the RPC are configuration: the recommendation (`0x684b…`, RPC rpc1) is pending the
@@ -35,6 +35,8 @@ public enum AddressPGPChain {
 		case transport(String)
 		case rpc(String)
 		case malformed
+		/// The two endpoints do not agree (a chain id that is not the configured one, different blocks hashes, or different answers at the same block): never a basis for a write.
+		case disagreement(String)
 	}
 
 	/// What the chain says about one account at one block.
@@ -50,6 +52,10 @@ public enum AddressPGPChain {
 	/// The shell's one CoNET RPC for AddressPGP (the client uses one configured RPC). The shell sets it once from its
 	/// native build configuration. It is never read from a PWA payload. Nil by default: nothing is configured from it, and every read fails closed.
 	public static var shellEndpoint: URL?
+
+	/// The second, independent CoNET RPC for the agreed read (the result of a first identity needs two endpoints that agree). The shell sets it once from its native build
+	/// configuration, never from a page payload. Nil by default: the agreed read fails closed as `unconfigured`.
+	public static var shellEndpointSecond: URL?
 
 	/// The configured source. Nil by default (is open). The shell or the app sets it after the owner confirms.
 	public static var configuration: Configuration?
@@ -141,10 +147,24 @@ public enum AddressPGPChain {
 	/// The result of `_pgpKeys(address)`: (string, string, string, bool).
 	static func decodePGPKeys(_ data: [UInt8]) -> (publicArmor: String, exists: Bool)? {
 		guard data.count >= 128 else { return nil }
-		guard let publicArmor = string(data, headOffset: 32),
-		      let existsWord = word(data, at: 96)
+		guard let stored = string(data, headOffset: 32),
+		      let existsWord = word(data, at: 96),
+		      let publicArmor = bareArmor(fromStored: stored)
 		else { return nil }
 		return (publicArmor, existsWord != 0)
+	}
+
+	/// The registered public key as bare armor. The contract holds the armor either as it is or as the base64 text of the armor (the PWA registers the base64 form, which starts with
+	/// `LS0tLS1CRUdJTiBQR1AgUFVCTElDIEtFWSBC`). Empty stays empty (no record). Text that starts with `-----BEGIN` is kept. Anything else must be strict base64 whose decoding is text that starts with
+	/// the public key header; otherwise the answer is malformed (a read failure, never a missing record). The result is always bare armor.
+	static func bareArmor(fromStored stored: String) -> String? {
+		if stored.isEmpty { return "" }
+		let header = "-----BEGIN PGP PUBLIC KEY BLOCK"
+		if stored.hasPrefix(header) { return stored }
+		// any other text that starts like an armor (a private key block, another block type) is not a registered public key
+		if stored.hasPrefix("-----BEGIN") { return nil }
+		guard let decoded = Data(base64Encoded: stored), let text = String(data: decoded, encoding: .utf8), text.hasPrefix(header) else { return nil }
+		return text
 	}
 
 	static func rpc(_ method: String, _ params: [Any], using config: Configuration? = nil) -> Result<Any, Error> {
@@ -213,6 +233,140 @@ public enum AddressPGPChain {
 			backup = decoded
 		}
 		return .success(Snapshot(exists: keys.exists, publicArmor: keys.publicArmor, backupBase64: backup))
+	}
+
+	// MARK: - The agreed read (two endpoints, one block)
+
+	/// What two endpoints agree on at one block.
+	public struct Agreed: Equatable {
+		public var snapshot: Snapshot
+		/// The block both endpoints read, as a JSON-RPC quantity.
+		public var block: String
+		/// Its hash, equal on both endpoints.
+		public var blockHash: String
+	}
+
+	/// The agreed read of the PGP record and the backup of `eoa`: both configured endpoints must name the configured chain id, report the same hash for one block (the lower of their
+	/// latest blocks), and answer both view calls identically at that block. Anything else is an error, and the result of a first identity (nothing registered) is taken from this read only.
+	public static func readAgreed(eoa rawEoa: String) -> Result<Agreed, Error> {
+		guard let configuration, configuration.isUsable, let second = shellEndpointSecond, second.scheme?.lowercased() == "https" else {
+			return .failure(ReadError.unconfigured)
+		}
+		return readAgreed(eoa: rawEoa, configuration: configuration, second: second)
+	}
+
+	static func readAgreed(eoa rawEoa: String, configuration: Configuration, second: URL) -> Result<Agreed, Error> {
+		let eoa = rawEoa.lowercased()
+		let keysData = selector("_pgpKeys(address)") + addressWord(eoa)
+		let backupData = selector("getEncryptedPrivateKey()")
+		switch agreedCalls(
+			configuration: configuration, second: second,
+			calls: [(data: keysData, from: nil), (data: backupData, from: eoa)]
+		) {
+		case .failure(let error): return .failure(error)
+		case .success(let agreed):
+			guard let keys = decodePGPKeys(agreed.results[0]), let backup = string(agreed.results[1], headOffset: 0) else {
+				return .failure(ReadError.malformed)
+			}
+			return .success(Agreed(snapshot: Snapshot(exists: keys.exists, publicArmor: keys.publicArmor, backupBase64: backup), block: agreed.block, blockHash: agreed.blockHash))
+		}
+	}
+
+	/// The agreed eth_call of any contract (the PGP record, the account registry): the rules above, for a list of calls.
+	static func agreedCalls(
+		configuration: Configuration, second: URL, calls: [(data: [UInt8], from: String?)]
+	) -> Result<(block: String, blockHash: String, results: [[UInt8]]), Error> {
+		let endpoints = [configuration, Configuration(contract: configuration.contract, chainId: configuration.chainId, rpcURL: second)]
+		guard endpoints.allSatisfy({ $0.isUsable }) else { return .failure(ReadError.unconfigured) }
+		// the chain id of both
+		for endpoint in endpoints {
+			guard case .success(let id) = rpc("eth_chainId", [], using: endpoint), let text = id as? String, text.hasPrefix("0x"),
+			      Int(text.dropFirst(2), radix: 16) == endpoint.chainId else { return .failure(ReadError.disagreement("chain_id")) }
+		}
+		// one block: the lower of the two latest blocks
+		var numbers: [Int] = []
+		for endpoint in endpoints {
+			switch latestBlock(using: endpoint) {
+			case .failure(let error): return .failure(error)
+			case .success(let value):
+				guard let n = Int(value.dropFirst(2), radix: 16) else { return .failure(ReadError.malformed) }
+				numbers.append(n)
+			}
+		}
+		let block = "0x" + String(numbers.min() ?? 0, radix: 16)
+		// the same block hash
+		var hashes: [String] = []
+		for endpoint in endpoints {
+			switch rpc("eth_getBlockByNumber", [block, false], using: endpoint) {
+			case .failure(let error): return .failure(error)
+			case .success(let value):
+				guard let object = value as? [String: Any], let hash = (object["hash"] as? String)?.lowercased(), hash.hasPrefix("0x"), hash.count == 66 else {
+					return .failure(ReadError.malformed)
+				}
+				hashes.append(hash)
+			}
+		}
+		guard hashes[0] == hashes[1] else { return .failure(ReadError.disagreement("block_hash")) }
+		// the same answers at that block
+		var results: [[UInt8]] = []
+		for call in calls {
+			var answers: [[UInt8]] = []
+			for endpoint in endpoints {
+				var object: [String: Any] = ["to": endpoint.contract, "data": hex(call.data)]
+				if let from = call.from { object["from"] = from }
+				switch rpc("eth_call", [object, block], using: endpoint) {
+				case .failure(let error): return .failure(error)
+				case .success(let value):
+					guard let text = value as? String, let raw = bytes(fromHex: text) else { return .failure(ReadError.malformed) }
+					answers.append(raw)
+				}
+			}
+			guard answers[0] == answers[1] else { return .failure(ReadError.disagreement("answer")) }
+			results.append(answers[0])
+		}
+		return .success((block, hashes[0], results))
+	}
+
+	// MARK: - The account registry (the owner of a BeamioTag)
+
+	/// The AccountRegistry contract (0x-prefixed, 40 hex digits). It comes from the init payload like the AddressPGP contract (never from a page request). Nil: the registry read fails closed.
+	public static var registryContract: String?
+
+	public enum RegistryOwner: Equatable {
+		/// No account holds the name.
+		case free
+		/// This address holds the name.
+		case owner(String)
+	}
+
+	/// `getOwnerByAccountName(string)`: the owner of a BeamioTag, read by both endpoints at one block (the same rules as the agreed PGP read). The zero address is `free`.
+	public static func registryOwnerAgreed(accountName: String) -> Result<RegistryOwner, Error> {
+		guard let configuration, configuration.isUsable, let second = shellEndpointSecond, second.scheme?.lowercased() == "https",
+		      let registry = registryContract, registry.hasPrefix("0x"), registry.count == 42, registry.dropFirst(2).allSatisfy({ $0.isHexDigit }) else {
+			return .failure(ReadError.unconfigured)
+		}
+		return registryOwnerAgreed(accountName: accountName, registry: registry, configuration: configuration, second: second)
+	}
+
+	static func registryOwnerAgreed(accountName: String, registry: String, configuration: Configuration, second: URL) -> Result<RegistryOwner, Error> {
+		let name = Array(accountName.utf8)
+		let padded = [UInt8](repeating: 0, count: (32 - name.count % 32) % 32)
+		let data = selector("getOwnerByAccountName(string)") + word(32) + word(name.count) + name + padded
+		let registryConfiguration = Configuration(contract: registry, chainId: configuration.chainId, rpcURL: configuration.rpcURL)
+		switch agreedCalls(configuration: registryConfiguration, second: second, calls: [(data: data, from: nil)]) {
+		case .failure(let error): return .failure(error)
+		case .success(let agreed):
+			let raw = agreed.results[0]
+			guard raw.count >= 32, raw.prefix(12).allSatisfy({ $0 == 0 }) else { return .failure(ReadError.malformed) }
+			let address = raw[12 ..< 32]
+			if address.allSatisfy({ $0 == 0 }) { return .success(.free) }
+			return .success(.owner(hex(Array(address))))
+		}
+	}
+
+	/// A 32-byte big-endian word of a small number.
+	static func word(_ n: Int) -> [UInt8] {
+		[UInt8](repeating: 0, count: 24) + withUnsafeBytes(of: UInt64(n).bigEndian) { Array($0) }
 	}
 
 	// MARK: - The first-identity chain field (single RPC;, 2026-11-20)

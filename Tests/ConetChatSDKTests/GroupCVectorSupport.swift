@@ -6,7 +6,7 @@ import XCTest
 /// gave for the row's own reqId. The digest is the registered one. Values are never printed: only the names of the fields
 /// that differ are returned. Synthetic data only.
 enum GroupCVector {
-	static let expectedSHA256 = "d5b032d274192088e82d52f1529c42f3eb766e9e8b43b50429935ec5abba51d0"
+	static let expectedSHA256 = "40ac9784730ddbdda5ed5cce96269973f833db90acd6c9073e890367a77280d6"
 
 	/// One row of group C, by its id (`C-01` to `C-29`). The file comes from PGP_BRIDGE_VECTORS, and its digest is checked.
 	static func row(_ id: String) throws -> [String: Any] {

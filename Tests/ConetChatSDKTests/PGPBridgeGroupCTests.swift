@@ -4,12 +4,15 @@ import XCTest
 @testable import ConetChatSDK
 
 /// The group C vectors of `pgp-bridge-command-vectors.v1.json`. The digest is the registered one. Of the
-/// 29 cases, the nine whose gate and request can be driven through the bridge with the seams of the test target are run here: C-04, C-05, C-21 to C-27.
+/// 33 cases of group C; those whose gate and request can be driven through the bridge with the seams of the test target are run here: C-04, C-05, C-21 to C-27 and C-31 to C-33.
 /// The others need a chain or backup fixture, a native confirmation flow, a pending state, or a write in flight. They are reported as not run, and none
 /// of them is claimed as passed. Synthetic data only.
 final class PGPBridgeGroupCTests: XCTestCase {
 	private final class Store: BeamioChatWalletKeyStoring {
 		var keys: [String: Data] = [:]
+		/// The key record cannot be read now (the storage state is unknown): the gate answers not_ready with no reason.
+		var unreadable = false
+		func keyRecordState(eoa: String) -> BeamioChatWalletKeyRecordState { unreadable ? .unreadable : (keys[eoa.lowercased()] == nil ? .absent : .present) }
 		func write(eoa: String, key: Data) -> Bool { keys[eoa.lowercased()] = key; return true }
 		func read(eoa: String) -> Data? { keys[eoa.lowercased()] }
 		func enumerateKeyOwners() -> [String]? { Array(keys.keys) }
@@ -40,10 +43,10 @@ final class PGPBridgeGroupCTests: XCTestCase {
 	}
 
 	/// The registered digest of `pgp-bridge-command-vectors.v1.json`.
-	static let expectedSHA256 = "d5b032d274192088e82d52f1529c42f3eb766e9e8b43b50429935ec5abba51d0"
+	static let expectedSHA256 = "40ac9784730ddbdda5ed5cce96269973f833db90acd6c9073e890367a77280d6"
 
 	/// The cases run here, by the gate they need. Every other case of group C is listed as not run.
-	static let runnable: Set<String> = ["C-04", "C-05", "C-21", "C-22", "C-23", "C-24", "C-25", "C-26", "C-27"]
+	static let runnable: Set<String> = ["C-04", "C-05", "C-21", "C-22", "C-23", "C-24", "C-25", "C-26", "C-27", "C-31", "C-32", "C-33"]
 
 	private let account = PgpMigrationTestSupport.eoa
 
@@ -77,8 +80,9 @@ final class PGPBridgeGroupCTests: XCTestCase {
 		case "G1":
 			store.keys[account] = Data(repeating: 0x11, count: 32)
 			BeamioConetChatModule.setNativeGateForTests(account: account, sessionReady: false)
-		case "G2", "G2_locked":
+		case "G2", "G2_locked", "G2_storage_unknown":
 			store.keys[account] = Data(repeating: 0x11, count: 32)
+			if gate == "G2_storage_unknown" { store.unreadable = true }
 			BeamioConetChatSignBroker.setSignerEoa(account)
 			BeamioConetChatModule.setNativeGateForTests(account: account, sessionReady: true)
 			if gate == "G2_locked" {
@@ -114,10 +118,26 @@ final class PGPBridgeGroupCTests: XCTestCase {
 		return events
 	}
 
-	/// C-04, C-05, C-21 to C-27: each runs once, in its gate, and answers the vector's ack with no other event (`events` is empty in the vector).
+	/// A-08 (group A, `pgpDecryptInbound` at G2 with the passcode bundle not provided): not_ready with the top level reason passcode_not_provided, and no other event. The row is
+	/// driven through the same gate arrangement and compared with the vector row.
+	func testA08DecryptWithoutThePasscodeBundleAnswersNotReadyWithTheReason() throws {
+		let cases = try vectorUnwrap { try vectorRoot()["cases"] as? [[String: Any]] }
+		let row = try XCTUnwrap(cases.first { $0["id"] as? String == "A-08" }, "A-08")
+		let request = try XCTUnwrap(row["request"] as? [String: Any])
+		let reqId = try XCTUnwrap(request["reqId"] as? String)
+		let restore = arrange(gate: row["gate"] as? String ?? "")
+		let events = dispatch(request)
+		restore()
+		XCTAssertEqual(events.filter { $0["reqId"] as? String == reqId }.count, 1, "A-08: one answer")
+		let differing = try GroupCVector.differences(row: row, answers: events)
+		print("GROUP-A-RUN A-08: \(differing.isEmpty ? "matches the vector" : "differs in \(differing.joined(separator: ", "))")")
+		XCTAssertTrue(differing.isEmpty, "A-08: the answers differ from the vector in \(differing.joined(separator: ", "))")
+	}
+
+	/// C-04, C-05, C-21 to C-27 and C-31 to C-33: each runs once, in its gate, and answers the vector's ack with no other event (`events` is empty in the vector).
 	func testTheRunnableCasesAnswerTheVectorInTheirGate() throws {
 		let cases = try vectorUnwrap { try vectorRoot()["cases"] as? [[String: Any]] }.filter { $0["group"] as? String == "C" }
-		XCTAssertEqual(cases.count, 30, "group C has 30 cases")
+		XCTAssertEqual(cases.count, 33, "group C has 33 cases")
 		var ran: [String] = []
 		for c in cases {
 			let id = c["id"] as? String ?? "?"

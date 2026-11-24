@@ -103,9 +103,9 @@ final class AddressPGPChainTests: XCTestCase {
 	// MARK: - Call shapes and the read
 
 	func testTheReadMakesTwoViewCallsAtOneBlockAndTheBackupCallCarriesTheAccount() {
-		mock = MockChain(exists: true, publicArmor: "armor", backup: "QUJD", readable: true)
+		mock = MockChain(exists: true, publicArmor: "-----BEGIN PGP PUBLIC KEY BLOCK-----\nsynthetic\n-----END PGP PUBLIC KEY BLOCK-----", backup: "QUJD", readable: true)
 		guard case .success(let snapshot) = AddressPGPChain.read(eoa: account) else { return XCTFail("read failed") }
-		XCTAssertEqual(snapshot, AddressPGPChain.Snapshot(exists: true, publicArmor: "armor", backupBase64: "QUJD"))
+		XCTAssertEqual(snapshot, AddressPGPChain.Snapshot(exists: true, publicArmor: "-----BEGIN PGP PUBLIC KEY BLOCK-----\nsynthetic\n-----END PGP PUBLIC KEY BLOCK-----", backupBase64: "QUJD"))
 		let methods = calls.map { $0["method"] as? String ?? "" }
 		XCTAssertEqual(methods, ["eth_blockNumber", "eth_call", "eth_call"])
 		let keysCall = (calls[1]["params"] as? [Any])?.first as? [String: Any]
@@ -117,7 +117,7 @@ final class AddressPGPChainTests: XCTestCase {
 	}
 
 	func testNoWriteSelectorIsEverSent() {
-		mock = MockChain(exists: true, publicArmor: "armor", backup: "QUJD", readable: true)
+		mock = MockChain(exists: true, publicArmor: "-----BEGIN PGP PUBLIC KEY BLOCK-----\nsynthetic\n-----END PGP PUBLIC KEY BLOCK-----", backup: "QUJD", readable: true)
 		_ = AddressPGPChain.read(eoa: account)
 		let forbidden = ["addPublicPGP", "addRoute", "setRouteBySig", "setMyRoute", "clearMyRoute", "changeAddressInAdminlist"]
 		for call in calls {
@@ -186,5 +186,55 @@ final class AddressPGPChainTests: XCTestCase {
 	func testATruncatedAnswerIsMalformed() {
 		XCTAssertNil(AddressPGPChain.decodePGPKeys([0, 1, 2]))
 		XCTAssertNil(AddressPGPChain.string([0, 0, 0], headOffset: 0))
+	}
+	// MARK: - publicKeyArmored as bare armor or as its base64 text
+
+	private let syntheticArmor = "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nsynthetic-armor-text\n-----END PGP PUBLIC KEY BLOCK-----\n"
+
+	/// The contract holds the base64 text of the armor (it starts with LS0tLS1CRUdJTiBQR1AgUFVCTElDIEtFWSBC): the snapshot holds the bare armor.
+	func testABase64RegisteredKeyIsDecodedToBareArmor() {
+		let stored = Data(syntheticArmor.utf8).base64EncodedString()
+		XCTAssertTrue(stored.hasPrefix("LS0tLS1CRUdJTiBQR1AgUFVCTElDIEtFWSBC"))
+		let decoded = AddressPGPChain.decodePGPKeys(encodedKeys(publicArmor: stored, exists: true))
+		XCTAssertEqual(decoded?.publicArmor, syntheticArmor)
+		XCTAssertEqual(decoded?.exists, true)
+	}
+
+	func testBareArmorIsKeptAndEmptyStaysEmpty() {
+		XCTAssertEqual(AddressPGPChain.decodePGPKeys(encodedKeys(publicArmor: syntheticArmor, exists: true))?.publicArmor, syntheticArmor)
+		let none = AddressPGPChain.decodePGPKeys(encodedKeys(publicArmor: "", exists: false))
+		XCTAssertEqual(none?.publicArmor, "")
+		XCTAssertEqual(none?.exists, false)
+	}
+
+	/// Neither armor nor base64: malformed (a read failure, not a missing record).
+	func testATextThatIsNeitherArmorNorBase64IsMalformed() {
+		XCTAssertNil(AddressPGPChain.decodePGPKeys(encodedKeys(publicArmor: "not an armor !!", exists: true)))
+	}
+
+	/// Base64 whose decoding does not start with the public key header is malformed; so is a base64 private key block and base64 with whitespace.
+	func testBase64WithoutThePublicHeaderIsMalformed() {
+		let noHeader = Data("hello, this is not a key block".utf8).base64EncodedString()
+		XCTAssertNil(AddressPGPChain.decodePGPKeys(encodedKeys(publicArmor: noHeader, exists: true)))
+		let privateBlock = Data("-----BEGIN PGP PRIVATE KEY BLOCK-----\nx\n".utf8).base64EncodedString()
+		XCTAssertNil(AddressPGPChain.decodePGPKeys(encodedKeys(publicArmor: privateBlock, exists: true)))
+		let spaced = Data(syntheticArmor.utf8).base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed])
+		XCTAssertNil(AddressPGPChain.decodePGPKeys(encodedKeys(publicArmor: spaced, exists: true)), "strict base64: no line breaks")
+	}
+
+	/// Through the read: a base64 registration gives a snapshot with bare armor; a malformed one is a read failure.
+	func testTheReadReturnsBareArmorForABase64RegistrationAndFailsOnAMalformedOne() {
+		mock = MockChain(exists: true, publicArmor: Data(syntheticArmor.utf8).base64EncodedString(), backup: "QUJD", readable: true)
+		guard case .success(let snapshot) = AddressPGPChain.read(eoa: "0x00000000000000000000000000000000000000a1") else { return XCTFail("a base64 registration must read") }
+		XCTAssertEqual(snapshot.publicArmor, syntheticArmor)
+		mock = MockChain(exists: true, publicArmor: "not an armor !!", backup: "QUJD", readable: true)
+		guard case .failure(let error) = AddressPGPChain.read(eoa: "0x00000000000000000000000000000000000000a1") else { return XCTFail("a malformed registration is a read failure") }
+		XCTAssertEqual(error as? AddressPGPChain.ReadError, .malformed)
+	}
+	/// A bare private key block, and any other bare block type, is not a registered public key: malformed (a read failure).
+	func testABareNonPublicBlockIsMalformed() {
+		XCTAssertNil(AddressPGPChain.decodePGPKeys(encodedKeys(publicArmor: "-----BEGIN PGP PRIVATE KEY BLOCK-----\nx\n-----END PGP PRIVATE KEY BLOCK-----", exists: true)))
+		XCTAssertNil(AddressPGPChain.decodePGPKeys(encodedKeys(publicArmor: "-----BEGIN PGP MESSAGE-----\nx\n-----END PGP MESSAGE-----", exists: true)))
+		XCTAssertNil(AddressPGPChain.decodePGPKeys(encodedKeys(publicArmor: "-----BEGIN CERTIFICATE-----\nx", exists: true)))
 	}
 }

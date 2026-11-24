@@ -77,7 +77,7 @@ final class FirstIdentityTests: XCTestCase {
 
 	func testRegisteredUnregisteredAndEveryFailureAreMappedFromOneRpc() {
 		XCTAssertEqual(AddressPGPChain.chainStatus(eoa: account), .unregistered, "read succeeded, nothing registered")
-		a.exists = true; a.armor = "armor"
+		a.exists = true; a.armor = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nsynthetic\n-----END PGP PUBLIC KEY BLOCK-----"
 		XCTAssertEqual(AddressPGPChain.chainStatus(eoa: account), .registered)
 		a.exists = false; a.armor = ""; a.backup = "AAAA"
 		XCTAssertEqual(AddressPGPChain.chainStatus(eoa: account), .registered, "a backup alone is a registration")
@@ -132,7 +132,7 @@ final class FirstIdentityTests: XCTestCase {
 				chain = AddressPGPChain.chainStatus(raw: raw)
 			} else if let rpc = input["rpc"] as? String {
 				switch rpc {
-				case "registered": a.exists = true; a.armor = "armor"
+				case "registered": a.exists = true; a.armor = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nsynthetic\n-----END PGP PUBLIC KEY BLOCK-----"
 				case "timeout", "error": a.up = false
 				case "malformed": a.malformed = true
 				default: break
@@ -211,7 +211,7 @@ final class FirstIdentityTests: XCTestCase {
 
 	func testTheRefusalOrderChainFirstThenTheDevice() {
 		// registered on the chain: cas_conflict, whatever the device holds
-		a.exists = true; a.armor = "armor"
+		a.exists = true; a.armor = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nsynthetic\n-----END PGP PUBLIC KEY BLOCK-----"
 		XCTAssertEqual(BeamioFirstIdentity.firstIdentityRefusal(eoa: account), "cas_conflict")
 		a.exists = false; a.armor = ""
 		XCTAssertNil(BeamioFirstIdentity.firstIdentityRefusal(eoa: account))
@@ -223,7 +223,7 @@ final class FirstIdentityTests: XCTestCase {
 
 	// MARK: the guards of the create flow (spec owner's codes)
 
-	private let fixedPair: (privateArmor: String, publicArmor: String) = ("-----BEGIN PGP PRIVATE KEY BLOCK-----\nk\n-----END PGP PRIVATE KEY BLOCK-----", "pub-armor-of-the-new-key")
+	private let fixedPair: (privateArmor: String, publicArmor: String) = ("-----BEGIN PGP PRIVATE KEY BLOCK-----\nk\n-----END PGP PRIVATE KEY BLOCK-----", "-----BEGIN PGP PUBLIC KEY BLOCK-----\npub-armor-of-the-new-key\n-----END PGP PUBLIC KEY BLOCK-----")
 
 	func testAConfirmationThatMeetsARegistrationIsACasConflictAndWritesNothing() {
 		let registrar = Registrar()
@@ -234,7 +234,7 @@ final class FirstIdentityTests: XCTestCase {
 		defer { BeamioPGPIdentityCreate.registration = nil; BeamioPGPIdentityCreate.generateKeyPair = saved }
 		XCTAssertEqual(BeamioPGPIdentityCreate.prepare(eoa: account, idempotencyKey: "g1"), .ready(.first))
 		// somebody registered an identity between the prepare and the confirmation
-		a.exists = true; a.armor = "someone else's armor"
+		a.exists = true; a.armor = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nsomeone else\n-----END PGP PUBLIC KEY BLOCK-----"
 		XCTAssertEqual(BeamioPGPIdentityCreate.confirm(eoa: account, idempotencyKey: "g1"), .casConflict)
 		XCTAssertEqual(generated, 0, "no key is generated")
 		XCTAssertEqual(registrar.calls, 0, "nothing is written to the chain")

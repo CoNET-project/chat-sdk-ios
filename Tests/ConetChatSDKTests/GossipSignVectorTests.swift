@@ -4,7 +4,7 @@ import XCTest
 
 #if BEAMIO_TEST_HOOKS
 
-/// gossip-sign-vectors.v1.json, third version: 32 cases. The 23 cases without a request run through
+/// gossip-sign-vectors.v1.json: 36 cases. The 23 cases without a request run through
 /// `BeamioGossipSign.sign`; the 9 request-shaped cases (R-1 to R-9) run through the `gossipSign` command, as the page sends them. A signature must match the vector byte
 /// for byte; a refusal must return the vector code and no signature. Synthetic key only. Runs with
 /// GOSSIP_SIGN_VECTORS=<path to the file>; skipped without it. The expectations are the vector file's.
@@ -12,7 +12,7 @@ import XCTest
 /// Recovery: the vectors carry `recoveredAddress`. This test compares it with the account whose key produced the signature
 /// (the key is checked against the account inside `BeamioNativeWallet`). It does not run an independent ecrecover.
 final class GossipSignVectorTests: XCTestCase {
-	static let expectedSHA256 = "de5e5d34284db8bc8903879a0ec633fd5d537aa89fdca1e8144cce329c9d4705"
+	static let expectedSHA256 = "4a0df29611af09eb27a10b2cefbdcda9df65335bf9c432ea85c1cf2a281f570a"
 
 	/// In-memory native store holding the synthetic account.
 	final class Store: BeamioChatWalletKeyStoring {
@@ -144,6 +144,12 @@ final class GossipSignVectorTests: XCTestCase {
 			let session = try XCTUnwrap(BeamioConetChatModule.testCurrentSession())
 			// pageDeferAck is the test context (the page's init declaration), not a field of the request.
 			let context = c["context"] as? [String: Any] ?? [:]
+			// R-11 expects a signature without the field, for a shell that does not declare inbound.generation.v1 (Android this version): not
+			// applicable to iOS, which declares it, so its deferAck session refuses the missing field. R-12 (a string field is bad_request) holds on iOS too and runs.
+			if (context["shellDeclaresGeneration"] as? Bool) == false, c["expect"] as? String == "ok" {
+				print("GOSSIP-SIGN \(id): not applicable (the shell does not declare generation.v1)")
+				continue
+			}
 			session.deferAck = (context["pageDeferAck"] as? Bool) ?? false
 			var body: [String: Any] = ["type": "gossipSign", "reqId": 60, "kind": c["kind"] as? String ?? "gossip", "message": message]
 			for (key, value) in request where key != "pageDeferAck" {

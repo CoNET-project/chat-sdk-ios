@@ -105,6 +105,8 @@ enum BeamioNativeKeySnapshot {
 		if pinnedUnknown { return }
 		#endif
 		publish(judgeLocked())
+		// the session start of a process finishes a plaintext cleanup that an earlier run left (it writes through `mutate`, which refreshes the snapshot)
+		if let raw = BeamioNativeWallet.keyStore as? BeamioChatRawItemStoring { mutate { BeamioMnemonicSets.resumeRetire(store: raw) } }
 	}
 
 	/// Runs a change of the key records, the account pointer or the passcode state, and refreshes the snapshot, in one critical section.

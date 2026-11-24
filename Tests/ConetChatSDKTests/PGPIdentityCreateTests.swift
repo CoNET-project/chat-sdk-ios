@@ -125,7 +125,7 @@ final class PGPIdentityCreateTests: XCTestCase {
 
 	func testARecordWithoutABackupIsPreparedAsReplace() throws {
 		try requireFramework()
-		chain = MockChain(exists: true, publicArmor: "armor", backup: "", readable: true)
+		chain = MockChain(exists: true, publicArmor: "-----BEGIN PGP PUBLIC KEY BLOCK-----\nsynthetic\n-----END PGP PUBLIC KEY BLOCK-----", backup: "", readable: true)
 		XCTAssertEqual(BeamioPGPIdentityCreate.prepare(eoa: account, idempotencyKey: "idem-r"), .ready(.replace))
 	}
 
@@ -457,7 +457,7 @@ final class PGPIdentityCreateTests: XCTestCase {
 	private enum NativeStep { case confirm, cancel, timeout }
 
 	/// The registered digest of `pgp-bridge-command-vectors.v1.json`. The same pin as PGPBridgeGroupCTests.
-	private static let bridgeVectorSHA256 = "d5b032d274192088e82d52f1529c42f3eb766e9e8b43b50429935ec5abba51d0"
+	private static let bridgeVectorSHA256 = "40ac9784730ddbdda5ed5cce96269973f833db90acd6c9073e890367a77280d6"
 
 	/// One row of group C, read from the registered vector file. The digest is checked, not printed.
 	private func groupCRow(_ id: String) throws -> [String: Any] {
@@ -538,7 +538,7 @@ final class PGPIdentityCreateTests: XCTestCase {
 		let restore = arrangeGroupCG2()
 		defer { restore() }
 		let row = try groupCRow("C-10")
-		chain = MockChain(exists: true, publicArmor: "armor-1", backup: "", readable: true)
+		chain = MockChain(exists: true, publicArmor: "-----BEGIN PGP PUBLIC KEY BLOCK-----\narmor-1\n-----END PGP PUBLIC KEY BLOCK-----", backup: "", readable: true)
 		sendIdentityCommand(try XCTUnwrap(row["request"] as? [String: Any]))
 		nativeIdentityStep(.confirm, key: "idem-c-10")
 		let mismatch = try rowMismatch(row: row)
@@ -553,7 +553,7 @@ final class PGPIdentityCreateTests: XCTestCase {
 		let restore = arrangeGroupCG2()
 		defer { restore() }
 		let row = try groupCRow("C-11")
-		chain = MockChain(exists: true, publicArmor: "armor-1", backup: "", readable: true)
+		chain = MockChain(exists: true, publicArmor: "-----BEGIN PGP PUBLIC KEY BLOCK-----\narmor-1\n-----END PGP PUBLIC KEY BLOCK-----", backup: "", readable: true)
 		sendIdentityCommand(try XCTUnwrap(row["request"] as? [String: Any]))
 		nativeIdentityStep(.cancel, key: "idem-c-11")
 		let mismatch = try rowMismatch(row: row)
@@ -570,7 +570,7 @@ final class PGPIdentityCreateTests: XCTestCase {
 		let restore = arrangeGroupCG2()
 		defer { restore() }
 		let row = try groupCRow("C-12")
-		chain = MockChain(exists: true, publicArmor: "armor-1", backup: "", readable: true)
+		chain = MockChain(exists: true, publicArmor: "-----BEGIN PGP PUBLIC KEY BLOCK-----\narmor-1\n-----END PGP PUBLIC KEY BLOCK-----", backup: "", readable: true)
 		sendIdentityCommand(try XCTUnwrap(row["request"] as? [String: Any]))
 		nativeIdentityStep(.timeout, key: "idem-c-12")
 		let mismatch = try rowMismatch(row: row)
@@ -591,7 +591,7 @@ final class PGPIdentityCreateTests: XCTestCase {
 			return savedGen(eoa)
 		}
 		defer { BeamioPGPIdentityCreate.generateKeyPair = savedGen }
-		chain = MockChain(exists: true, publicArmor: "armor-1", backup: "", readable: true)
+		chain = MockChain(exists: true, publicArmor: "-----BEGIN PGP PUBLIC KEY BLOCK-----\narmor-1\n-----END PGP PUBLIC KEY BLOCK-----", backup: "", readable: true)
 		sendIdentityCommand(try XCTUnwrap(row["request"] as? [String: Any]))
 		chain = MockChain(exists: true, publicArmor: "someone-else", backup: "QUJD", readable: true)
 		nativeIdentityStep(.confirm, key: "idem-c-13")
@@ -615,7 +615,7 @@ final class PGPIdentityCreateTests: XCTestCase {
 			return out
 		}
 		defer { BeamioPGPIdentityCreate.generateKeyPair = savedGen }
-		chain = MockChain(exists: true, publicArmor: "armor-1", backup: "", readable: true)
+		chain = MockChain(exists: true, publicArmor: "-----BEGIN PGP PUBLIC KEY BLOCK-----\narmor-1\n-----END PGP PUBLIC KEY BLOCK-----", backup: "", readable: true)
 		sendIdentityCommand(try XCTUnwrap(row["request"] as? [String: Any]))
 		nativeIdentityStep(.confirm, key: "idem-c-14")
 		let mismatch = try rowMismatch(row: row)
@@ -648,7 +648,7 @@ final class PGPIdentityCreateTests: XCTestCase {
 		let restore = arrangeGroupCG2()
 		defer { restore() }
 		let row = try groupCRow("C-15")
-		chain = MockChain(exists: true, publicArmor: "armor-1", backup: "", readable: true)
+		chain = MockChain(exists: true, publicArmor: "-----BEGIN PGP PUBLIC KEY BLOCK-----\narmor-1\n-----END PGP PUBLIC KEY BLOCK-----", backup: "", readable: true)
 		let key = "idem-c-15"
 		sendIdentityCommand(["type": "pgpIdentityCreate", "reqId": "c3-c-15-first", "accountKey": account + ":default", "idempotencyKey": key])
 		nativeIdentityStep(.confirm, key: key)

@@ -1,6 +1,9 @@
 import CryptoKit
 import XCTest
 @testable import ConetChatSDK
+#if canImport(X19)
+import X19
+#endif
 
 #if BEAMIO_TEST_HOOKS
 
@@ -110,11 +113,22 @@ final class PGPRestoreChainTests: XCTestCase {
 	}
 
 	/// Applies one case's chain steps: `identity` (a synthetic key name, or nil for no record) and `blob` (a backup name).
-	private func setChain(identity: String?, blob: String) throws {
+	private func setChain(identity: String?, blob: String, publicAsBase64: Bool = false) throws {
 		chainReadable = true
 		if let identity {
 			chainExists = true
 			chainPublicArmor = try privateArmor(identity)
+			// the registered key is a public key: the public armor of the synthetic key, bare or as the base64 text the contract really holds
+			#if canImport(X19)
+			var failure: NSError?
+			let pub = X19PublicArmor(chainPublicArmor, &failure) as String
+			XCTAssertNil(failure)
+			chainPublicArmor = pub
+			if publicAsBase64 {
+				chainPublicArmor = Data(pub.utf8).base64EncodedString()
+				XCTAssertTrue(chainPublicArmor.hasPrefix("LS0tLS1CRUdJTiBQR1AgUFVCTElDIEtFWSBC"))
+			}
+			#endif
 		} else {
 			chainExists = false
 			chainPublicArmor = ""
@@ -146,6 +160,8 @@ final class PGPRestoreChainTests: XCTestCase {
 		switch method {
 		case "eth_blockNumber":
 			result = "0x1f4"
+		case "eth_chainId":
+			result = "0x" + String(224422, radix: 16)
 		case "eth_call":
 			let call = ((object["params"] as? [Any])?.first as? [String: Any]) ?? [:]
 			let data = (call["data"] as? String) ?? ""
@@ -226,6 +242,37 @@ final class PGPRestoreChainTests: XCTestCase {
 		try setChain(identity: "P1", blob: "B_P1_OK")
 		_ = dispatch("pgpRestoreEvaluate", reqId: "c3-c-eval", expectingEvents: 1)
 		XCTAssertNil(BeamioChatPgpKeychain.load(eoa: account), "the evaluation must not write the record")
+	}
+
+	// MARK: - the registered public key as the contract holds it (base64 text of the armor)
+
+	func testEvaluateReachesTheFingerprintCheckWithABase64RegisteredKey() throws {
+		try loadVectors()
+		try installAccountKey()
+		try setChain(identity: "P1", blob: "B_P1_OK", publicAsBase64: true)
+		let r = try XCTUnwrap(dispatch("pgpRestoreEvaluate", reqId: "b64-eval", expectingEvents: 1).first?["result"] as? [String: Any])
+		XCTAssertEqual(r["state"] as? String, "ok", "the base64 registration is read: the fingerprint check is reached and passes")
+	}
+
+	func testRestoreWritesTheLocalRecordWithBareArmorFromABase64RegisteredKey() throws {
+		try loadVectors()
+		try installAccountKey()
+		try setChain(identity: "P1", blob: "B_P1_OK", publicAsBase64: true)
+		let events = dispatch("pgpRestore", reqId: "b64-restore", expectingEvents: 2)
+		let result = try XCTUnwrap(events.first { $0["type"] as? String == "pgpRestoreResult" })
+		XCTAssertEqual(result["code"] as? String, "ok")
+		let stored = try XCTUnwrap(BeamioChatPgpKeychain.load(eoa: account))
+		XCTAssertEqual(stored.privateKeyArmor, try privateArmor("P1"))
+		XCTAssertTrue(stored.publicKeyArmor.hasPrefix("-----BEGIN PGP PUBLIC KEY BLOCK"), "the stored public key is the bare armor, not the base64 text")
+	}
+
+	func testAFingerprintMismatchWithABase64RegisteredKeyStoresNothing() throws {
+		try loadVectors()
+		try installAccountKey()
+		try setChain(identity: "P1", blob: "B_P2_UNDER_A", publicAsBase64: true)
+		let result = try XCTUnwrap(dispatch("pgpRestore", reqId: "b64-mismatch", expectingEvents: 2).first { $0["type"] as? String == "pgpRestoreResult" })
+		XCTAssertEqual(result["code"] as? String, "pgp_fingerprint_mismatch")
+		XCTAssertNil(BeamioChatPgpKeychain.load(eoa: account))
 	}
 
 	// MARK: - C-06 to C-09: restore

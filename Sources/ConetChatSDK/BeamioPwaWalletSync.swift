@@ -246,6 +246,8 @@ enum BeamioPwaWalletSync {
 			// method Y: the record stays the envelope; a correct passcode only readies the session, with the key in process memory (never stored)
 			if decrypted, let key = sessionKey {
 				BeamioCipherUnlock.hold(eoa: envelope.eoa, key: key)
+				// the unlock proved that the v3 record derives this very address: the older device copies of the account are retired and deleted (a failure is retried later)
+				BeamioMnemonicSets.retireLegacy(eoa: envelope.eoa, store: raw)
 				BeamioNativeKeySnapshot.invalidate()   // the gate judges the account again, now that its session is ready
 				// a legal account switch (the device named another account before): the answer says the account was saved and made current; the session is ready for it
 				if let previous = previousAccount, previous != envelope.eoa {

@@ -135,10 +135,18 @@ enum BeamioChatRouteRegister {
 			guard (1...64).contains(bytes.count), bytes.allSatisfy({ (0x20...0x7E).contains($0) }) else { return nil }
 			return text
 		}
+		return bridgeInteger(raw)
+	}
+
+	/// The one numeric rule of a bridge field that is a non-negative integer (reqId, inboundGeneration, and any other): an NSNumber that is not a
+	/// boolean, whose double value is finite, has no fractional part and lies in 0 to 2^53-1. The Objective-C type does not decide: a JS number
+	/// crosses WKScriptMessage as a double ("d") and is accepted when it is a whole number. A string, a decimal, a negative, NaN, infinity,
+	/// a boolean or a value out of range is nil.
+	static func bridgeInteger(_ raw: Any?) -> Int? {
 		guard let number = raw as? NSNumber else { return nil }
 		if CFGetTypeID(number as CFTypeRef) == CFBooleanGetTypeID() { return nil }
 		let value = number.doubleValue
-		guard value == value.rounded(.towardZero), value >= 0, value <= 9_007_199_254_740_991 else { return nil }
+		guard value.isFinite, value == value.rounded(.towardZero), value >= 0, value <= 9_007_199_254_740_991 else { return nil }
 		return Int(value)
 	}
 
@@ -228,11 +236,17 @@ enum BeamioChatRouteRegister {
 		guard normalizedArmor(publicArmor) == normalizedArmor(record.publicKeyArmor) else {
 			return .failure(RouteRegisterRefusal(code: "sig_rejected"))
 		}
+		return signedRegistration(account: account, privateArmor: record.privateKeyArmor, request: request, timestamp: timestamp, iv: iv, nonce: nonce)
+	}
+
+	/// The signing stage on its own: the PGP private armor may come from a record or from a new identity that is still pending. The EOA key is used inside `withAccountKey` and wiped there.
+	static func signedRegistration(account rawAccount: String, privateArmor: String, request: Request, timestamp: Int64, iv: [UInt8], nonce: [UInt8]) -> Result<[String: Any], RouteRegisterRefusal> {
+		let account = rawAccount.lowercased()
 		guard nonce.count == 16 else { return .failure(RouteRegisterRefusal(code: "bad_request")) }
 		let nonceText = "0x" + hexLower(nonce)
 		let outcome = BeamioNativeWallet.withAccountKey(eoa: account) { key -> [String: Any]? in
 			let password = passwordString(privateKey: key)
-			guard let backup = backupBase64(privateArmor: record.privateKeyArmor, password: password, iv: iv) else { return nil }
+			guard let backup = backupBase64(privateArmor: privateArmor, password: password, iv: iv) else { return nil }
 			let message = registrationMessage(wallet: account, keyID: request.keyID, publicKeyBase64: request.publicKeyArmored,
 			                                  encrypKeyBase64: backup, routeKeyID: request.routeKeyID,
 			                                  timestamp: timestamp, nonce: nonceText)

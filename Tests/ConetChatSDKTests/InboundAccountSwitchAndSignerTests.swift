@@ -301,7 +301,8 @@ final class InboundAccountSwitchAndSignerTests: XCTestCase {
 		XCTAssertNil(BeamioConetChatModule.parseInboundGeneration(nil), "missing")
 		XCTAssertNil(BeamioConetChatModule.parseInboundGeneration("2"), "a string")
 		XCTAssertNil(BeamioConetChatModule.parseInboundGeneration(2.5), "a decimal")
-		XCTAssertNil(BeamioConetChatModule.parseInboundGeneration(2.0), "a decimal written with a point")
+		// iOS judges by value; a JS number arrives as a double, so a whole 2.0 is the integer 2.
+		XCTAssertEqual(BeamioConetChatModule.parseInboundGeneration(2.0), 2, "a whole double is an integer on the iOS bridge")
 		XCTAssertNil(BeamioConetChatModule.parseInboundGeneration(-1), "a negative number")
 		XCTAssertNil(BeamioConetChatModule.parseInboundGeneration(9_007_199_254_740_992), "above 2^53-1")
 		XCTAssertNil(BeamioConetChatModule.parseInboundGeneration(true), "a boolean")

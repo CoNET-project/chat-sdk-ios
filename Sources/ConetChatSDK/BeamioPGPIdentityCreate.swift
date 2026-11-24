@@ -25,6 +25,8 @@ public enum BeamioPGPIdentityCreate {
 	/// the transaction form and the gas payer is open.
 	public protocol Registering {
 		func register(eoa: String, publicArmor: String, idempotencyKey: String, seen: String) -> Result<Void, Error>
+		/// The public armor of the mailbox route the last successful registration of `eoa` was sent with. Empty when the registration did not choose one.
+		func routeArmor(registered eoa: String) -> String
 	}
 
 #if BEAMIO_TEST_HOOKS
@@ -33,14 +35,13 @@ public enum BeamioPGPIdentityCreate {
 	static var registration: Registering?
 #endif
 
-	/// The registration in force. The product build has no injection point: it is always nil, so a generated key waits and the
-	/// command answers `waiting_registration`.
+	/// The registration in force: the test injection, else the product registration (a signed registration posted to the Beamio API and read back from the chain). Without the
+	/// API origin and the two chain endpoints from the shell's build configuration it is nil, so a generated key waits and the command answers `waiting_registration`.
 	static var activeRegistration: Registering? {
 #if BEAMIO_TEST_HOOKS
-		registration
-#else
-		nil
+		if let registration { return registration }
 #endif
+		return BeamioPGPRegistrar.isConfigured ? BeamioPGPRegistrar.production : nil
 	}
 
 	/// Key generation. The default is the X-19 v4 wrapper; tests inject a fixed pair.
@@ -229,6 +230,11 @@ public enum BeamioPGPIdentityCreate {
 			// Internal to the native confirmation: no bridge code and no event (eventCode is nil for it).
 			return .failed("not_prepared")
 		}
+		// a passcode lock stops the confirmation before anything is generated, saved or written to the chain
+		guard !BeamioPasscodeSession.shared.isLocked(eoa: eoa) else {
+			setInFlightIdentity(eoa: eoa, nil)
+			return .cancelledLocked
+		}
 		var pending = start
 		if pending.privateArmor.isEmpty {
 			// CAS 1: the state the user saw is still the state on chain.
@@ -258,7 +264,7 @@ public enum BeamioPGPIdentityCreate {
 			// CAS 2: before anything is written, the state is read again.
 			// The chain already holds this very identity (a write that went through before the record was kept): no write, nothing is changed, and the
 			// answer says so (a no-op, not a second registration).
-			if let same = readChain(eoa), same.exists, !same.publicArmor.isEmpty, same.publicArmor == pending.publicArmor {
+			if let same = readChain(eoa), same.exists, !same.publicArmor.isEmpty, BeamioPGPRegistrar.sameKey(same.publicArmor, pending.publicArmor) {
 				setInFlightIdentity(eoa: eoa, nil)
 				return .failed("already_registered_same_key")
 			}
@@ -278,32 +284,39 @@ public enum BeamioPGPIdentityCreate {
 		// One chain write at a time: a confirmation that arrives during a running write does not write again.
 		guard beginWrite(eoa: eoa) else { return .idempotent }
 		defer { endWrite(eoa: eoa) }
+		// the lock is judged once more right before the chain write
+		guard !BeamioPasscodeSession.shared.isLocked(eoa: eoa) else { return .cancelledLocked }
 		switch registration.register(eoa: eoa, publicArmor: pending.publicArmor, idempotencyKey: idempotencyKey, seen: pending.seen) {
 		case .failure:
 			return .retryWrite
 		case .success:
-			guard let keyId = BeamioPGPBackup.keyIdentity(armor: pending.publicArmor)?.subkeyKeyID else {
-				return .failed("write_failed")
-			}
-			let record = BeamioChatPgpKeychain.Secrets(
-				privateKeyArmor: pending.privateArmor, publicKeyArmor: pending.publicArmor, pgpKeyId: keyId,
-				routePublicKeyArmor: "", entryDomains: [], siNodes: [], mailboxIp: "", eoa: eoa
-			)
-			guard BeamioChatPgpKeychain.save(record) else {
-				BeamioChatPgpKeychain.removeRecord(eoa: eoa)
-				return .failed("write_reverted")
-			}
-			guard let back = BeamioChatPgpKeychain.load(eoa: eoa),
-			      back.privateKeyArmor == pending.privateArmor, back.publicKeyArmor == pending.publicArmor
-			else {
-				BeamioChatPgpKeychain.removeRecord(eoa: eoa)
-				return .failed("readback_failed")
-			}
-			// The identity is registered and kept. An erase of the pending key that fails does not undo that: a flag is left, and the next start erases again.
-			if !BeamioChatPgpKeychain.clearPending(eoa: eoa) { BeamioChatPgpKeychain.markCleanupPending(eoa: eoa) }
-			setCompletedIdentity(eoa: eoa, CompletedIdentity(idempotencyKey: idempotencyKey, mode: Mode(rawValue: pending.mode) ?? .replace))
-			return .ok
+			return activate(eoa: eoa, pending: pending, routeArmor: registration.routeArmor(registered: eoa))
 		}
+	}
+
+	/// The registered identity becomes the local record: the pending key, its public key and the route it was registered with, written and read back. Then the pending key is erased.
+	static func activate(eoa: String, pending: BeamioChatPgpKeychain.PendingIdentity, routeArmor: String) -> ConfirmOutcome {
+		guard let keyId = BeamioPGPRegistrar.identityOf(pending.publicArmor)?.subkeyKeyID else {
+			return .failed("write_failed")
+		}
+		let record = BeamioChatPgpKeychain.Secrets(
+			privateKeyArmor: pending.privateArmor, publicKeyArmor: pending.publicArmor, pgpKeyId: keyId,
+			routePublicKeyArmor: routeArmor, entryDomains: [], siNodes: [], mailboxIp: "", eoa: eoa
+		)
+		guard BeamioChatPgpKeychain.save(record) else {
+			BeamioChatPgpKeychain.removeRecord(eoa: eoa)
+			return .failed("write_reverted")
+		}
+		guard let back = BeamioChatPgpKeychain.load(eoa: eoa),
+		      back.privateKeyArmor == pending.privateArmor, back.publicKeyArmor == pending.publicArmor
+		else {
+			BeamioChatPgpKeychain.removeRecord(eoa: eoa)
+			return .failed("readback_failed")
+		}
+		// The identity is registered and kept. An erase of the pending key that fails does not undo that: a flag is left, and the next start erases again.
+		if !BeamioChatPgpKeychain.clearPending(eoa: eoa) { BeamioChatPgpKeychain.markCleanupPending(eoa: eoa) }
+		setCompletedIdentity(eoa: eoa, CompletedIdentity(idempotencyKey: pending.idempotencyKey, mode: Mode(rawValue: pending.mode) ?? .replace))
+		return .ok
 	}
 
 	/// Where a confirmation came from. Only the native panel may confirm a new identity (spec: native only, native confirmed).
@@ -375,4 +388,8 @@ public enum BeamioPGPIdentityCreate {
 			}
 		}
 	}
+}
+
+extension BeamioPGPIdentityCreate.Registering {
+	public func routeArmor(registered eoa: String) -> String { "" }
 }

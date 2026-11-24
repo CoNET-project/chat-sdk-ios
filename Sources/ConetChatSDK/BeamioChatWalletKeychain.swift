@@ -154,7 +154,7 @@ public struct BeamioChatWalletKeychainStore: BeamioChatWalletKeyStoring {
 
 	/// A key write and its snapshot refresh run in one critical section (25.52Y.70 第 4 項 (c)).
 	public func write(eoa: String, key: Data) -> Bool {
-		BeamioNativeKeySnapshot.mutate { writeUnsnapped(eoa: eoa, key: key) }
+		BeamioNativeKeySnapshot.mutate { clearLegacyRetireRecord(owner: Self.owner(eoa)) && writeUnsnapped(eoa: eoa, key: key) }
 	}
 
 	func writeUnsnapped(eoa: String, key: Data) -> Bool {
@@ -191,6 +191,12 @@ public struct BeamioChatWalletKeychainStore: BeamioChatWalletKeyStoring {
 	public func keyRecordState(eoa: String) -> BeamioChatWalletKeyRecordState {
 		let owner = Self.owner(eoa)
 		guard !owner.isEmpty else { return .absent }
+		// the older wallet key record of an account that the passcode state has taken over is not returned (see `legacyAwareItem`)
+		switch BeamioMnemonicSets.legacyView(store: self, eoa: owner) {
+		case .live: break
+		case .retired: return .absent
+		case .retiredUnverified, .unknown: return .unreadable
+		}
 #if BEAMIO_TEST_HOOKS
 		if BeamioChatWalletTestMemory.on {
 			guard BeamioChatWalletTestMemory.get(service, Self.walletKeyAccount(owner)) != nil else { return .absent }
@@ -234,7 +240,7 @@ public struct BeamioChatWalletKeychainStore: BeamioChatWalletKeyStoring {
 	public func hasAnyKeyRecord() -> Bool {
 #if BEAMIO_TEST_HOOKS
 		if BeamioChatWalletTestMemory.on {
-			return BeamioChatWalletTestMemory.accounts(service).contains { $0.hasPrefix("walletKey:") }
+			return BeamioChatWalletTestMemory.accounts(service).contains { $0.hasPrefix("walletKey:") && !isRetiredLegacy(String($0.dropFirst("walletKey:".count))) }
 		}
 		#endif
 		let query: [String: Any] = [
@@ -250,7 +256,8 @@ public struct BeamioChatWalletKeychainStore: BeamioChatWalletKeyStoring {
 		if status == errSecItemNotFound { return false }
 		guard status == errSecSuccess, let rows = items as? [[String: Any]] else { return true }
 		return rows.contains { row in
-			(row[kSecAttrAccount as String] as? String)?.hasPrefix("walletKey:") == true
+			guard let account = row[kSecAttrAccount as String] as? String, account.hasPrefix("walletKey:") else { return false }
+			return !isRetiredLegacy(String(account.dropFirst("walletKey:".count)))
 		}
 	}
 
@@ -269,7 +276,8 @@ public struct BeamioChatWalletKeychainStore: BeamioChatWalletKeyStoring {
 			for account in BeamioChatWalletTestMemory.accounts(service) {
 				if account == Self.legacyAccount { return nil }
 				guard account.hasPrefix(Self.perAccountPrefix) else { continue }
-				owners.append(String(account.dropFirst(Self.perAccountPrefix.count)))
+				let owner = String(account.dropFirst(Self.perAccountPrefix.count))
+				if !isRetiredLegacy(owner) { owners.append(owner) }
 			}
 			return owners
 		}
@@ -292,7 +300,8 @@ public struct BeamioChatWalletKeychainStore: BeamioChatWalletKeyStoring {
 			// 25.52Y.105 第 1 項: a row of another kind (mnemonic, phase, intent, commit) is skipped; it does not fail the enumeration.
 			if account == Self.legacyAccount { return nil }
 			guard account.hasPrefix(Self.perAccountPrefix) else { continue }
-			owners.append(String(account.dropFirst(Self.perAccountPrefix.count)))
+			let owner = String(account.dropFirst(Self.perAccountPrefix.count))
+			if !isRetiredLegacy(owner) { owners.append(owner) }
 		}
 		return owners
 	}
@@ -307,6 +316,7 @@ public struct BeamioChatWalletKeychainStore: BeamioChatWalletKeyStoring {
 				if account == Self.legacyAccount { return nil }
 				guard account.hasPrefix(Self.perAccountPrefix) else { continue }
 				let owner = String(account.dropFirst(Self.perAccountPrefix.count))
+				if isRetiredLegacy(owner) { continue }
 				out.append(BeamioChatKeyCreation(owner: owner, created: BeamioChatWalletTestMemory.created(service, account)))
 			}
 			return out
@@ -329,6 +339,7 @@ public struct BeamioChatWalletKeychainStore: BeamioChatWalletKeyStoring {
 			if account == Self.legacyAccount { return nil }
 			guard account.hasPrefix(Self.perAccountPrefix) else { continue }
 			let owner = String(account.dropFirst(Self.perAccountPrefix.count))
+			if isRetiredLegacy(owner) { continue }
 			out.append(BeamioChatKeyCreation(owner: owner, created: row[kSecAttrCreationDate as String] as? Date))
 		}
 		return out
@@ -345,7 +356,8 @@ public struct BeamioChatWalletKeychainStore: BeamioChatWalletKeyStoring {
 				if account == Self.legacyAccount {
 					out.append(.unavailable)
 				} else if account.hasPrefix(Self.perAccountPrefix) {
-					out.append(checkPerAccountItem(owner: String(account.dropFirst(Self.perAccountPrefix.count))))
+					let owner = String(account.dropFirst(Self.perAccountPrefix.count))
+					if !isRetiredLegacy(owner) { out.append(checkPerAccountItem(owner: owner)) }
 				}
 			}
 			return out
@@ -369,7 +381,7 @@ public struct BeamioChatWalletKeychainStore: BeamioChatWalletKeyStoring {
 				out.append(.unavailable)
 			} else if account.hasPrefix(Self.perAccountPrefix) {
 				let owner = String(account.dropFirst(Self.perAccountPrefix.count))
-				out.append(checkPerAccountItem(owner: owner))
+				if !isRetiredLegacy(owner) { out.append(checkPerAccountItem(owner: owner)) }
 			}
 		}
 		return out
@@ -450,6 +462,7 @@ public struct BeamioChatWalletKeychainStore: BeamioChatWalletKeyStoring {
 	}
 
 	private func readKey(eoa: String, suppressUI: Bool) -> Data? {
+		if case .live = BeamioMnemonicSets.legacyView(store: self, eoa: Self.owner(eoa)) {} else { return nil }
 #if BEAMIO_TEST_HOOKS
 		if BeamioChatWalletTestMemory.on {
 			let owner = Self.owner(eoa)
@@ -770,6 +783,33 @@ extension BeamioChatWalletKeychainStore: BeamioChatMnemonicKeyStoring {
 		}
 	}
 
+	/// Removes the retirement record of the older copies of `owner` before an older-format item is written for it. True when no record is left.
+	private func clearLegacyRetireRecord(owner: String) -> Bool {
+		guard !owner.isEmpty else { return true }
+		switch rawRead(account: BeamioMnemonicSets.legacyRetireName(owner)) {
+		case .absent: return true
+		case .unreadable: return false
+		case .present: return rawDelete(account: BeamioMnemonicSets.legacyRetireName(owner))
+		}
+	}
+
+	/// True when the older copies of this owner are retired and the v3 record is verified: the owner is no longer listed by the key and mnemonic enumerations.
+	private func isRetiredLegacy(_ owner: String) -> Bool {
+		BeamioMnemonicSets.legacyView(store: self, eoa: owner) == .retired
+	}
+
+	/// The item of a kind as the readers see it: the older device copies (`mnemonic:`, `walletKey:`) of an account that the passcode state has taken over are not returned. Retired and verified: not
+	/// found (the account is judged by its v3 record). Retired but the v3 record does not read back, or the pointer cannot be read: an item that cannot be read, never absent and never the copy.
+	private func legacyAwareItem(_ kind: BeamioChatWalletItemKind, owner: String) -> (status: OSStatus, data: Data?) {
+		let account = Self.itemAccount(kind, owner: owner)
+		guard kind == .mnemonic || kind == .key else { return rawItem(account: account) }
+		switch BeamioMnemonicSets.legacyView(store: self, eoa: owner) {
+		case .live: return rawItem(account: account)
+		case .retired: return (errSecItemNotFound, nil)
+		case .retiredUnverified, .unknown: return (errSecInteractionNotAllowed, nil)
+		}
+	}
+
 	private func rawItem(account: String) -> (status: OSStatus, data: Data?) {
 #if BEAMIO_TEST_HOOKS
 		if BeamioChatWalletTestMemory.on {
@@ -795,7 +835,7 @@ extension BeamioChatWalletKeychainStore: BeamioChatMnemonicKeyStoring {
 #endif
 		let owner = Self.owner(rawOwner)
 		guard !owner.isEmpty else { return true }
-		let got = rawItem(account: Self.itemAccount(.mnemonic, owner: owner))
+		let got = legacyAwareItem(.mnemonic, owner: owner)
 		switch got.status {
 		case errSecItemNotFound, errSecDecode: return false
 		case errSecSuccess:
@@ -814,7 +854,7 @@ extension BeamioChatWalletKeychainStore: BeamioChatMnemonicKeyStoring {
 	public func itemState(_ kind: BeamioChatWalletItemKind, eoa: String) -> BeamioChatItemState {
 		let owner = Self.owner(eoa)
 		guard !owner.isEmpty else { return .unreadable }
-		let got = rawItem(account: Self.itemAccount(kind, owner: owner))
+		let got = legacyAwareItem(kind, owner: owner)
 		if got.status == errSecItemNotFound {
 			// no `mnemonic:<eoa>` item: the no-passcode set of the same owner is the mnemonic of the account
 			if kind == .mnemonic {
@@ -839,6 +879,8 @@ extension BeamioChatWalletKeychainStore: BeamioChatMnemonicKeyStoring {
 	func writeItemUnsnapped(_ kind: BeamioChatWalletItemKind, eoa: String, value: Data) -> Bool {
 		let owner = Self.owner(eoa)
 		guard !owner.isEmpty, !value.isEmpty else { return false }
+		// an older-format item written again for an account whose copies were retired is a new choice of that item: the retirement record no longer applies
+		if kind == .mnemonic || kind == .key, !clearLegacyRetireRecord(owner: owner) { return false }
 		let payload: Data
 		switch kind {
 		case .intent, .commit:
@@ -883,7 +925,7 @@ extension BeamioChatWalletKeychainStore: BeamioChatMnemonicKeyStoring {
 	public func readItem(_ kind: BeamioChatWalletItemKind, eoa: String) -> Data? {
 		let owner = Self.owner(eoa)
 		guard !owner.isEmpty else { return nil }
-		let found = rawItem(account: Self.itemAccount(kind, owner: owner))
+		let found = legacyAwareItem(kind, owner: owner)
 		guard let data = found.data else {
 			if kind == .mnemonic, found.status == errSecItemNotFound, case .phrase(let phrase) = BeamioMnemonicSets.readSet(store: self, eoa: owner) { return phrase }
 			return nil
@@ -1194,6 +1236,11 @@ public protocol BeamioChatRawItemStoring: BeamioChatMnemonicKeyStoring {
 	/// Judges the payload of a copy of one mnemonic item (the bytes `rawRead` gives for it) for `owner`: `valid` with the phrase, `invalid`, or
 	/// `unreadable`. Nothing is written or deleted, and no key is returned. A store that cannot judge a payload answers `unreadable` (fail closed).
 	func judgeMnemonicPayload(_ bytes: Data, owner: String) -> (state: BeamioMnemonicAccountState, phrase: Data?)
+	/// Deletes the plaintext mnemonic set of `eoa` (`mnemonic.set.<eoa>`, never a v3 version and never the pointer). Only the cleanup of a retired set calls it. True when the item is absent after the call.
+	func deleteRetiredPlainSet(eoa: String) -> Bool
+	/// Deletes the older device copies of `eoa` once the passcode state holds the account: the wrapped mnemonic item `mnemonic:<eoa>` (with the credential key that goes with it) and the wallet key
+	/// record `walletKey:<eoa>`. Only the cleanup of a retired account calls it. True when the store did the deletions; the caller checks that the items are gone.
+	func deleteRetiredLegacyItems(eoa: String) -> Bool
 	/// Every account name of the raw items of this store, from the attributes only. nil: the store cannot list its items (fail closed: the caller reads that as unknown).
 	func rawAccountNames() -> [String]?
 }
@@ -1201,6 +1248,16 @@ public protocol BeamioChatRawItemStoring: BeamioChatMnemonicKeyStoring {
 extension BeamioChatRawItemStoring {
 	/// A store that cannot list its items says so; the callers treat that as an unknown state, never as "no items".
 	public func rawAccountNames() -> [String]? { nil }
+
+	/// The plain deletion of the one plaintext set item. A store that guards its set items overrides it.
+	public func deleteRetiredPlainSet(eoa: String) -> Bool { rawDelete(account: BeamioMnemonicSets.setName(eoa)) }
+
+	/// A store that guards its items overrides it; the plain store deletes the two items and the credential key.
+	public func deleteRetiredLegacyItems(eoa: String) -> Bool {
+		let mnemonic = deleteItem(.mnemonic, eoa: eoa)
+		delete(eoa: eoa)
+		return mnemonic
+	}
 
 	public func judgeMnemonicPayload(_ bytes: Data, owner: String) -> (state: BeamioMnemonicAccountState, phrase: Data?) {
 		(.unreadable, nil)

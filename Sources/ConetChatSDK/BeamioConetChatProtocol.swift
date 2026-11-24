@@ -45,10 +45,17 @@ public enum BeamioConetChatProtocol {
 		// A build without it fails closed on the page (a release blocker), so it is never moved to `qaCapabilities`. Declared only because the
 		// six commands (BeamioShellPasscodeCommands) are implemented and tested.
 		BeamioConetChatProtocol.passcodeCapability,
+		// Native delivery receipts: declared only because setRoutes validation and answers, the eoa check,
+		// the whitelist, the (from, sendId) and armorHash dedupe, the two in-flight places, the 128 / 10-minute queue, the locks and the clear
+		// are all implemented and tested (DeliveryReceiptTests, DR-01..18). Never remove one of them without removing this name.
+		BeamioConetChatProtocol.deliveryReceiptCapability,
 	] + qaCapabilities
 
 	/// The capability of the shell passcode protocol. Not `identity.native-keys.v1`, which only says that the native layer holds the keys.
 	public static let passcodeCapability = "wallet.passcode.v1"
+
+	/// The capability of the native delivery receipt. The page sends `setRoutes` and skips its own receipt only when hello declares it.
+	public static let deliveryReceiptCapability = "receipt.delivery.v1"
 
 	// The native key pair (`identity.kpresent.v1`, `identity.native-keys.v1`) is in `capabilities` above, in the shipped list. It is not a QA
 	// switch: a Release build declares it (project requirement; 25.52Y.119 to Y.121). Its prerequisites are in place: kPresent on the G0
@@ -57,7 +64,7 @@ public enum BeamioConetChatProtocol {
 	/// The static declaration of the QA candidate. Compiled only in the QA configuration, which defines
 	/// BEAMIO_QA_BUILD. Release and Store builds do not contain these names in the hello list. Not a runtime switch.
 #if BEAMIO_QA_BUILD
-	static let qaCapabilities: [String] = ["identity.route-register.native.v1", "wallet.credential.v1"]
+	static let qaCapabilities: [String] = ["identity.route-register.native.v1", "wallet.credential.v1", "identity.first.status.v1"]
 #else
 	static let qaCapabilities: [String] = []
 #endif

@@ -417,12 +417,18 @@ public enum BeamioChatPgpKeychain {
 		public var seen: String
 		/// The mode the user was shown: `replace` or `first`. Kept with the pending identity so a repeated command can answer it (C-15).
 		public var mode: String
-		public init(privateArmor: String, publicArmor: String, idempotencyKey: String, seen: String, mode: String = "replace") {
+		/// The mailbox route the registration was (or will be) sent with: its key ID (the node domain) and its public armor. Empty until a route is chosen. Kept so that a registration that
+		/// is found on the chain after a restart is saved with the very route it was sent with.
+		public var routeKeyID: String
+		public var routeArmor: String
+		public init(privateArmor: String, publicArmor: String, idempotencyKey: String, seen: String, mode: String = "replace", routeKeyID: String = "", routeArmor: String = "") {
 			self.privateArmor = privateArmor
 			self.publicArmor = publicArmor
 			self.idempotencyKey = idempotencyKey
 			self.seen = seen
 			self.mode = mode
+			self.routeKeyID = routeKeyID
+			self.routeArmor = routeArmor
 		}
 	}
 
@@ -436,7 +442,9 @@ public enum BeamioChatPgpKeychain {
 	public static func savePending(eoa rawEoa: String, _ pending: PendingIdentity) -> Bool {
 		let eoa = normalized(rawEoa)
 		guard !eoa.isEmpty else { return false }
-		let meta: [String: String] = ["idempotencyKey": pending.idempotencyKey, "seen": pending.seen, "mode": pending.mode]
+		var meta: [String: String] = ["idempotencyKey": pending.idempotencyKey, "seen": pending.seen, "mode": pending.mode]
+		if !pending.routeKeyID.isEmpty { meta["routeKeyID"] = pending.routeKeyID }
+		if !pending.routeArmor.isEmpty { meta["routeArmor"] = pending.routeArmor }
 		guard let data = try? JSONSerialization.data(withJSONObject: meta), let json = String(data: data, encoding: .utf8) else {
 			return false
 		}
@@ -459,7 +467,9 @@ public enum BeamioChatPgpKeychain {
 			publicArmor: read(account: scoped(fieldPendingPublic, eoa)) ?? "",
 			idempotencyKey: meta["idempotencyKey"] ?? "",
 			seen: meta["seen"] ?? "",
-			mode: meta["mode"] ?? "replace"
+			mode: meta["mode"] ?? "replace",
+			routeKeyID: meta["routeKeyID"] ?? "",
+			routeArmor: meta["routeArmor"] ?? ""
 		)
 	}
 

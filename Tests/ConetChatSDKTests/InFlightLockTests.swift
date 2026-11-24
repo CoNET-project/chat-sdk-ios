@@ -127,10 +127,9 @@ final class InFlightLockTests: XCTestCase {
 		XCTAssertEqual(events.first?["ok"] as? Bool, true)
 		XCTAssertEqual((events.first?["result"] as? [String: Any])?["accepted"] as? Bool, true)
 		XCTAssertEqual(events.last?["type"] as? String, "pgpRestoreResult")
-		// a passcode lock in flight is not an application-level event any more: the restore is not `cancelled` by it.
-		// the held read gave no source, so the restore ends with the source code, not with `cancelled` and not with `locked`
-		XCTAssertEqual(events.last?["code"] as? String, "pgp_source_unavailable", "a lock in flight does not cancel the restore")
-		XCTAssertEqual(events.last?["state"] as? String, "undetermined")
+		// a lock found after `accepted` and before anything is written cancels the restore: one result `cancelled` (vector C-28), whatever the read gave
+		XCTAssertEqual(events.last?["code"] as? String, "cancelled", "a lock in flight cancels the restore")
+		XCTAssertNil(events.last?["state"], "the cancelled result carries no state")
 		XCTAssertNil(events.last?["record"], "no data is returned")
 		XCTAssertNil(events.last?["result"], "no data is returned")
 	}
@@ -163,7 +162,7 @@ final class InFlightLockTests: XCTestCase {
 		XCTAssertEqual(evaluation?["code"] as? String, "pgp_source_unavailable")
 	}
 
-	/// a passcode lock found before the chain write of the identity creation: no chain write, the pending secret is dropped, and the
+	/// a passcode lock found before the chain write of the identity creation: no chain write, the pending key is kept, and the
 	/// result is `cancelled`.
 	func testAnIdentityConfirmLockedBeforeTheChainWriteIsCancelledWithNoWrite() {
 		let restore = arrangeUnlocked()
@@ -178,10 +177,10 @@ final class InFlightLockTests: XCTestCase {
 		XCTAssertTrue(BeamioChatPgpKeychain.savePending(eoa: account, pending))
 		BeamioPasscodeSession.shared.lockAll()
 		let outcome = BeamioPGPIdentityCreate.confirm(eoa: account, idempotencyKey: "key-1")
-		// a passcode lock is not an application-level event; the confirmation is not `cancelled` by it and goes on to its own write.
-		XCTAssertEqual(outcome, .failed("write_failed"), "the confirmation reaches the chain write; the probe answers a write failure")
-		XCTAssertEqual(BeamioPGPIdentityCreate.eventCode(outcome), "retry_write")
-		XCTAssertEqual(probe.calls, 1, "the confirmation reaches the chain write as for an unlocked account")
+		// a passcode lock found before the chain write cancels the confirmation: nothing is written to the chain, and the result is `cancelled`.
+		XCTAssertEqual(outcome, .cancelledLocked, "a locked account does not reach the chain write")
+		XCTAssertEqual(BeamioPGPIdentityCreate.eventCode(outcome), "cancelled")
+		XCTAssertEqual(probe.calls, 0, "no chain write happened")
 	}
 
 	/// C-28 (pgp-bridge-command-vectors, the row itself): the ack `accepted` is the only answer while the read is held, then one

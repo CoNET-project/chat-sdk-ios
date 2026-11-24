@@ -141,7 +141,7 @@ final class PasscodeUnlockSyncVectorTests: XCTestCase {
 		assertOkUnlocked(sync(["eoa": syn.eoa, "cipher": envelope(), "passcode": syn.passcode]), "MS-03")
 		XCTAssertEqual(currentCipherEoa(), syn.eoa)
 		XCTAssertFalse(itemNames().contains { $0.hasSuffix(BeamioMnemonicSets.setName(syn.eoa)) }, "MS-03: never a plaintext set")
-		XCTAssertEqual(itemNames().count, 2, "MS-03: one envelope version and the pointer")
+		XCTAssertEqual(itemNames().count, 3, "MS-03: one envelope version, the pointer and the cleanup record (no secret)")
 		assertSigns(syn.eoa, "MS-03")
 	}
 

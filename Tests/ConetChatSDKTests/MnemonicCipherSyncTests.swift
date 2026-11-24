@@ -135,19 +135,21 @@ final class MnemonicCipherSyncTests: XCTestCase {
 		XCTAssertEqual(canonical(try XCTUnwrap(preread())["cipher"]), canonical(e), "current is still the first version")
 	}
 
-	/// a plaintext set and a cipher version of the same mnemonic are separate; current moves between them and nothing is lost
+	/// a plaintext set and a cipher version of the same mnemonic are separate until the version is stored and named: then the plaintext set of the account is deleted silently (a cleanup
+	/// record stays), the answer is the cipher only, and a plaintext phrase never replaces the envelope
 	func testPlaintextAndCipherVersionsCoexistAndAPlaintextPhraseDoesNotReplaceTheEnvelope() throws {
 		let fog = "fog spot notable regret pizza coffee harvest ensure fog spot notable reflect"
 		XCTAssertEqual((sync(["phrase": fog])["result"] as? [String: Any])?["sync"] as? String, "updated")
 		let plain = try XCTUnwrap(preread())
 		XCTAssertEqual(plain["code"] as? String, "ok")
 		XCTAssertEqual(plain["mnemonic"] as? String, fog)
-		let plainBytes = store.rawAccounts[BeamioMnemonicSets.setName(eoa)]
+		XCTAssertNotNil(store.rawAccounts[BeamioMnemonicSets.setName(eoa)], "the plaintext set exists before the passcode state")
 		XCTAssertEqual(code(sync(["cipher": try envelope("MCF3-01")])), "ok")
 		let now = try XCTUnwrap(preread())
 		XCTAssertNotNil(now["cipher"], "current is now the passcode state")
 		XCTAssertNil(now["mnemonic"])
-		XCTAssertEqual(store.rawAccounts[BeamioMnemonicSets.setName(eoa)], plainBytes, "the plaintext set is kept byte for byte")
+		XCTAssertNil(store.rawAccounts[BeamioMnemonicSets.setName(eoa)], "the plaintext set is deleted once the passcode state holds the account")
+		XCTAssertNotNil(store.rawAccounts[BeamioMnemonicSets.retireName(eoa)], "the cleanup record stays")
 		// method Y: a plaintext phrase never replaces the v3 envelope of the same account; the record stays the envelope and nothing is written
 		let before = store.rawAccounts
 		XCTAssertEqual((sync(["phrase": fog])["result"] as? [String: Any])?["sync"] as? String, "unchanged", "the envelope is not replaced by the plaintext set")

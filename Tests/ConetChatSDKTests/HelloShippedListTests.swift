@@ -3,7 +3,7 @@ import Foundation
 import XCTest
 @testable import ConetChatSDK
 
-/// The shipped `hello` list of the iOS SDK (25.52Y.121 第 1 条): 16 names, the 14 implemented names and then `identity.kpresent.v1` and
+/// The shipped `hello` list of the iOS SDK (25.52Y.121 第 1 条): 18 names, the 14 implemented names and then `identity.kpresent.v1` and
 /// `identity.native-keys.v1` in that order. It is the same in a Release build (no BEAMIO_QA_BUILD); a QA build adds its own names after it.
 /// The shared vector file is `chat-daemon-vectors.v1.json`, sha256 13073ba4… (25.52Y.121 第 4 项).
 final class HelloShippedListTests: XCTestCase {
@@ -25,9 +25,10 @@ final class HelloShippedListTests: XCTestCase {
 		"identity.kpresent.v1",
 		"identity.native-keys.v1",
 		"wallet.passcode.v1",
+		"receipt.delivery.v1",
 	]
 
-	private static let registeredVectorSha = "da2f86b6af55b25d65fc9821f3db0432e81a39d1c5d98da66e01c3f5483dab6a"
+	private static let registeredVectorSha = "ce5fad6366743c706d7213e83175e6b9fee9a2b1f327ddc177b9dc7797cee88f"
 
 	func testTheShippedIosListIsTheSeventeenNamesInOrder() throws {
 		#if !BEAMIO_QA_BUILD
@@ -42,7 +43,7 @@ final class HelloShippedListTests: XCTestCase {
 		let url = try XCTUnwrap(Bundle.module.url(forResource: "chat-daemon-vectors.v1", withExtension: "json"))
 		let data = try Data(contentsOf: url)
 		let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-		XCTAssertEqual(digest, Self.registeredVectorSha, "the bundled chat-daemon vectors are the registered da2f86b6 file")
+		XCTAssertEqual(digest, Self.registeredVectorSha, "the bundled chat-daemon vectors are the registered ce5fad63 file")
 		let root = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
 		let hello = try XCTUnwrap(root["hello"] as? [String: Any])
 		let ios = try XCTUnwrap((hello["implementations"] as? [String: Any])?["ios"] as? [String: Any])

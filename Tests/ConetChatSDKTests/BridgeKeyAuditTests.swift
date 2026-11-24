@@ -32,6 +32,8 @@ final class BridgeKeyAuditTests: XCTestCase {
 
 	/// The accepted (command, path) pairs for status b (items 1 and 2).
 	private let acceptedPairs: Set<String> = [
+		// The new account's password goes to the native layer once, to seal the recover record; it is not stored, logged or returned.
+		"accountCreateRegister|password (request field)",
 		"shellRecordRead|profiles[*].privateKeyArmor",
 		"shellRecordWrite|profiles[*].privateKeyArmor",
 		"shellRecordWrite|mnemonicPhrase",
@@ -70,6 +72,7 @@ final class BridgeKeyAuditTests: XCTestCase {
 
 	/// The table (command × exact path). Keyed by file, enclosing function, enclosing `for` header and trimmed line.
 	private let table: [Row] = [
+		Row(file: "BeamioConetChatModule.swift", function: "accountCreateRegister", context: "", text: "guard Set(body.keys) == [\"type\", \"reqId\", \"tag\", \"password\"], let tag = body[\"tag\"] as? String, let password = body[\"password\"] as? String else { return createRegisterRefuse(echo, \"bad_request\") }", command: "accountCreateRegister", path: "password (request field)", status: "b", note: "the password the user typed on the page for the new account: used in memory for this call only, to seal the recover record (argon2id then AES-256-GCM); never stored, logged or returned (table-T and the bridge audit let only this command carry it)"),
 		Row(file: "BeamioChatPgpKeychain.swift", function: "decodeK", context: "", text: "(object[\"privateKeyArmor\"] ?? \"\").contains(\"BEGIN PGP PRIVATE KEY\")", command: "K record (local store)", path: "privateKeyArmor presence", status: "b", note: "25.52Y.77 K item: a presence check that opens the record; no armor is returned"),
 		Row(file: "BeamioShellRecord.swift", function: "importedCopyHeld", context: "", text: "return profiles.contains { ($0[\"keyID\"] as? String)?.lowercased() == account.lowercased() && $0[\"privateKeyArmor\"] != nil }", command: "shellRecordRead", path: "profiles[*].privateKeyArmor", status: "b", note: "stored record, keyID = account; G0 gate existence check, no value"),
 		Row(file: "BeamioShellRecord.swift", function: "read", context: "", text: "if !owned.contains(where: { ($0 as? [String: Any])?[\"privateKeyArmor\"] != nil }) {", command: "shellRecordRead", path: "profiles[*].privateKeyArmor", status: "b", note: "stored record, keyID = account (ownership of the answer)"),

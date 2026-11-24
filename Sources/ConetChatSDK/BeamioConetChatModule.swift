@@ -42,7 +42,34 @@ public enum BeamioConetChatModule {
 		/// Route key ID the running listen sent its last `mailbox_listen` to (log + handoff check).
 		public var listenRouteKeyId: String = ""
 		public var nodes: [Node] = []
-		public var routes: [[String: Any]] = []
+		/// The peers' routes the page handed over by `setRoutes` (memory only). Read and written under `routesLock`.
+		public var routes: [[String: Any]] {
+			get { routesLock.lock(); defer { routesLock.unlock() }; return routesStorage }
+			set { routesLock.lock(); routesStorage = newValue; routesLock.unlock() }
+		}
+		private var routesStorage: [[String: Any]] = []
+		private let routesLock = NSLock()
+		/// Receipts that waited for a route (from, sendId, armorHash, queued at, generation); and the armorHashes already receipted or queued.
+		/// Memory only, no plaintext. Guarded by `receiptLock`.
+		var receiptQueue: [(from: String, sendId: String, armorHash: String, at: Date, generation: Int)] = []
+		var receiptedHashes: [String] = []
+		/// (from, sendId) already receipted or queued, oldest first; at most 1024.
+		var receiptedKeys: [String] = []
+		/// Receipts ready to post but waiting for one of the two in-flight places (shares the 128 limit with `receiptQueue`).
+		var receiptOutbox: [(route: [String: Any], sendId: String, armorHash: String)] = []
+		var receiptInFlight = 0
+		let receiptLock = NSLock()
+		/// Drops the routes and the queued receipts (identity clear, account switch, session end, init rebuild).
+		func clearReceiptState() {
+			routes = []
+			receiptLock.lock()
+			receiptQueue = []
+			receiptedHashes = []
+			receiptedKeys = []
+			receiptOutbox = []
+			receiptInFlight = 0
+			receiptLock.unlock()
+		}
 		public var conetRpcUrl: String = "https://rpc1.conet.network"
 		public var ipfsBaseUrl: String = "https://ipfs.conet.network/api"
 		public var ipfsWriteBaseUrl: String = ""
@@ -177,7 +204,7 @@ public enum BeamioConetChatModule {
 		"walletTransferSwitched", "chatRouteRegister",
 		"voiceEphemeralRegister", "voiceEphemeralSeal", "voiceEphemeralPrepare", "voiceEphemeralForget",
 		"passcodeProvision", "passcodeUnlock", "passcodeChange", "passcodeDisable", "nativeRepairProvide",
-		"nativeIdentityCheck", "accountCleanupOld",
+		"nativeIdentityCheck", "accountCleanupOld", "accountCreateRegister",
 	]
 
 	/// The reference table T: the bridge names that the command table knows. Not the spec names
@@ -456,6 +483,11 @@ public enum BeamioConetChatModule {
 				}
 				return
 			}
+			// a lock found after `accepted` and before anything is written: one result `cancelled`, no data, nothing written (vector C-28)
+			if BeamioPasscodeSession.shared.isLocked(eoa: account) {
+				DispatchQueue.main.async { emitEvent(["type": "pgpRestoreResult", "reqId": echo, "code": "cancelled"]) }
+				return
+			}
 			// no record and no backup. `accepted` was already sent, so the answer is the result event
 			// (`no_identity_yet`, state and code alike), not an ack.
 			if evaluation.state == "first_identity" {
@@ -466,7 +498,7 @@ public enum BeamioConetChatModule {
 			if evaluation.state == "ok" {
 				// the lock is judged again right before the save, inside writeLocal.
 				outcome = BeamioPGPRestoreCommands.writeLocal(
-					eoa: account, evaluation: evaluation, stillUnlocked: { true }
+					eoa: account, evaluation: evaluation, stillUnlocked: { !BeamioPasscodeSession.shared.isLocked(eoa: account) }
 				)
 			} else {
 				outcome = (evaluation.code ?? "pgp_source_unavailable", evaluation.state)
@@ -584,6 +616,65 @@ public enum BeamioConetChatModule {
 
 	/// The reqId of the pgpIdentityCreate command that is prepared (events carry it). Set on a ready prepare.
 	static var identityCreateReqId: Any?
+
+	private static let createRegisterLock = NSLock()
+	private static var createRegisterRunning: Set<String> = []
+
+	/// `accountCreateRegister {type, reqId, tag, password}` (new-account registration protocol v1): the registration payload of a new account (the BeamioTag and the recover
+	/// records), signed and sealed here; the page only forwards it to /addUser. The answer is `result {accountName, wallet, signMessage, recover, recoverCodeBase58}`, or an error code
+	/// of the table: bad_request, bad_tag, bad_password, tag_taken, sign_failed, seal_failed, not_ready, in_flight, not_available. The password stays in memory for this call, and the
+	/// request is never logged beyond its lengths.
+	private static func createRegisterRefuse(_ echo: Any, _ code: String) {
+		emitEvent(BeamioChatRouteRegister.ackEnvelope(reqId: echo, result: nil, error: code))
+	}
+
+	private static func accountCreateRegister(_ body: [String: Any]) {
+		guard let echo = BeamioChatRouteRegister.reqIdEcho(body["reqId"]) else {
+			emitEvent(BeamioChatRouteRegister.ackEnvelope(reqId: NSNull(), result: nil, error: "bad_request"))
+			return
+		}
+		// not enabled in this build: nothing else is looked at
+		guard BeamioNewAccountFeature.enabled else { return createRegisterRefuse(echo, "not_available") }
+		guard Set(body.keys) == ["type", "reqId", "tag", "password"], let tag = body["tag"] as? String, let password = body["password"] as? String else { return createRegisterRefuse(echo, "bad_request") }
+		let account = BeamioConetChatSignBroker.currentSignerEoa().lowercased()
+		guard !account.isEmpty, !BeamioPasscodeSession.shared.isLocked(eoa: account) else { return createRegisterRefuse(echo, "not_ready") }
+		createRegisterLock.lock()
+		let started = createRegisterRunning.insert(account).inserted
+		createRegisterLock.unlock()
+		guard started else { return createRegisterRefuse(echo, "in_flight") }
+		DispatchQueue.global(qos: .userInitiated).async {
+			let outcome = BeamioAccountRegisterPayload.make(tag: tag, password: password, eoa: account)
+			createRegisterLock.lock(); createRegisterRunning.remove(account); createRegisterLock.unlock()
+			DispatchQueue.main.async {
+				switch outcome {
+				case .success(let result): emitEvent(BeamioChatRouteRegister.ackEnvelope(reqId: echo, result: result, error: nil))
+				case .failure(let failure):
+					// `already_registered` is not in the table of the protocol: the page reads an unknown code as failed. Reported to the interface seat.
+					emitEvent(BeamioChatRouteRegister.ackEnvelope(reqId: echo, result: nil, error: failure.code))
+				}
+			}
+		}
+	}
+
+	/// The state of the first-identity registration (`firstIdentityStatus`, new-account registration protocol v1): `state` of registering, registered, retry_later, identity_pending,
+	/// failed; the optional `reason` of no_record_confirmed, read_unavailable, submit_5xx, submit_4xx, conflict_other_key, readback_timeout; the optional `attempt` and `retryAfterMs`.
+	/// Only these five keys, and nothing about a key, an armor, a fingerprint, a signature, a tag or a password. QA build only.
+	static func emitFirstIdentityStatus(state: String, reason: String? = nil, attempt: Int? = nil, retryAfterMs: Int? = nil) {
+		var event: [String: Any] = ["type": "firstIdentityStatus", "state": state]
+		if let reason { event["reason"] = reason }
+		if let attempt { event["attempt"] = attempt }
+		if let retryAfterMs { event["retryAfterMs"] = retryAfterMs }
+		#if BEAMIO_QA_BUILD
+		emitEvent(event)
+		#endif
+		#if BEAMIO_TEST_HOOKS
+		firstIdentityStatusForTests.append(event)
+		#endif
+	}
+
+	#if BEAMIO_TEST_HOOKS
+	static var firstIdentityStatusForTests: [[String: Any]] = []
+	#endif
 
 	/// The one `pgpIdentityCreateResult` for the prepared command. Nil code: no event.
 	static func emitIdentityCreateResult(code: String?) {
@@ -968,6 +1059,8 @@ public enum BeamioConetChatModule {
 			pgpRestoreCommand(body, type: type)
 		case "accountCleanupOld":
 			accountCleanupOld(body)
+		case "accountCreateRegister":
+			accountCreateRegister(body)
 		case "passcodeStatus":
 			passcodeStatus(body)
 		case "passcodeRun":
@@ -1209,9 +1302,8 @@ public enum BeamioConetChatModule {
 		s.nodes = resolvedNodes(supplied: suppliedNodes, current: s.nodes) {
 			keychainSiNodes(owner: pgpOwner)
 		}
-		if let routesRaw = payload["routes"] as? [[String: Any]] {
-			s.routes = routesRaw
-		}
+		// delivery receipts: init takes no routes; the page sends them with setRoutes after init. A rebuild starts empty.
+		s.clearReceiptState()
 
 		guard !s.eoa.isEmpty else {
 			initStageLog(reqId, "identity", "exit=missing_identity")
@@ -1430,6 +1522,8 @@ public enum BeamioConetChatModule {
 			initAnswerLog(reqId, ok: true, code: "ok", since: since)
 			emitEvent(["type": "ready", "reqId": reqId, "result": readyResult()])
 			initStageLog(reqId, "ready", "emitted=true attach=\(attach)")
+			// the account is unlocked and ready: a first identity is made and registered in the background when the chain shows none
+			BeamioFirstIdentityScheduler.kick(eoa: s.eoa)
 			announceInboundGeneration()
 			if attach {
 				s.pendingLock.lock()
@@ -1701,6 +1795,7 @@ public enum BeamioConetChatModule {
 	/// marker moves to the account only after the wipe succeeded.
 	private static func clearAndMark(_ account: String) -> Bool {
 		gossipRetry.clear()
+		currentSession()?.clearReceiptState()
 		let wiped = BeamioInboxIO.wipeNow {
 			let inbox = BeamioConetChatInboxStore.clear()
 			let ledger = BeamioConetChatCallLedger.clear()
@@ -1719,12 +1814,7 @@ public enum BeamioConetChatModule {
 
 	/// a valid `inboundGeneration` is a JSON integer from 0 to 2^53-1. A boolean, a string, a decimal or a value out of range is not.
 	static func parseInboundGeneration(_ value: Any?) -> Int? {
-		guard let number = value as? NSNumber else { return nil }
-		if CFGetTypeID(number) == CFBooleanGetTypeID() { return nil }
-		guard ["c", "C", "s", "S", "i", "I", "l", "L", "q", "Q"].contains(String(cString: number.objCType)) else { return nil }
-		let d = number.doubleValue
-		guard d >= 0, d <= 9_007_199_254_740_991 else { return nil }
-		return Int(d)
+		BeamioChatRouteRegister.bridgeInteger(value)
 	}
 
 	/// The user cleared the identity: the inbox goes, with the armor the page has not confirmed and the dedupe records; so do
@@ -1753,6 +1843,31 @@ public enum BeamioConetChatModule {
 		s.pendingAcks[armorHash] = (plaintext: "", from: "0x0000000000000000000000000000000000000009", at: Date())
 		s.pendingLock.unlock()
 	}
+
+	/// Test build only: stages a displayed message awaiting the page's ackInbound, with its real plaintext (delivery-receipt cases).
+	static func testStagePending(armorHash: String, plaintext: String, from: String) {
+		guard let s = currentSession() else { return }
+		s.pendingLock.lock()
+		s.pendingAcks[armorHash] = (plaintext: plaintext, from: from, at: Date())
+		s.pendingLock.unlock()
+	}
+
+	/// Test build only: the queued receipts and the flush with a given clock.
+	static func testReceiptQueueCount() -> Int {
+		guard let s = currentSession() else { return 0 }
+		s.receiptLock.lock(); defer { s.receiptLock.unlock() }
+		return s.receiptQueue.count
+	}
+	static func testFlushReceipts(now: Date) {
+		guard let s = currentSession() else { return }
+		flushQueuedReceipts(session: s, now: now)
+	}
+	static func testAgeReceiptQueue(by seconds: TimeInterval) {
+		guard let s = currentSession() else { return }
+		s.receiptLock.lock(); defer { s.receiptLock.unlock() }
+		s.receiptQueue = s.receiptQueue.map { ($0.from, $0.sendId, $0.armorHash, $0.at.addingTimeInterval(-seconds), $0.generation) }
+	}
+	static func testDestroySession() { destroy() }
 
 	/// Test build only: the pending acks of the current session.
 	static func testPendingAckCount() -> Int {
@@ -3750,11 +3865,53 @@ public enum BeamioConetChatModule {
 		emitEvent(["type": "event:status", "payload": payload])
 	}
 
-	private static func handleSetRoutes(_ body: [String: Any]) {
-		guard let s = currentSession() else { return }
-		if let routes = body["routes"] as? [[String: Any]] {
-			s.routes = routes
+	static let setRoutesMaxEntries = 256
+	static let setRoutesMaxArmorBytes = 32 * 1024
+	static let receiptQueueMax = 128
+	static let receiptQueueTTL: TimeInterval = 600
+
+	/// `setRoutes`: a full replacement of the peers' routes. `eoa` is required and must be the session's account.
+	/// More than 256 entries, an armor over 32 KB or a non-array answers `bad_request` and changes nothing; an unusable entry is dropped alone.
+	/// Memory only; the log keeps counts. Internal for the tests.
+	static func handleSetRoutes(_ body: [String: Any]) {
+		let reqId = body["reqId"] as? Int ?? -1
+		func reply(_ ok: Bool, _ error: String? = nil, _ result: [String: Any]? = nil) {
+			if reqId >= 0 { ack(reqId, ok: ok, result: result, error: error) }
 		}
+		guard let s = currentSession() else { reply(false, "not_ready"); return }
+		guard let eoaRaw = body["eoa"] as? String, !eoaRaw.isEmpty else { reply(false, "bad_request"); return }
+		guard !s.eoa.isEmpty, normalizeAddress(eoaRaw) == normalizeAddress(s.eoa) else {
+			reply(false, "signer_mismatch")
+			return
+		}
+		guard let raw = body["routes"] as? [Any], raw.count <= setRoutesMaxEntries else { reply(false, "bad_request"); return }
+		var byEoa: [String: [String: Any]] = [:]
+		var order: [String] = []
+		var dropped = 0
+		for item in raw {
+			guard let entry = item as? [String: Any] else { dropped += 1; continue }
+			let userPgp = entry["userPublicKeyArmored"] as? String ?? ""
+			let routerPgp = entry["routerArmoredPublicKey"] as? String ?? ""
+			if userPgp.utf8.count > setRoutesMaxArmorBytes || routerPgp.utf8.count > setRoutesMaxArmorBytes {
+				reply(false, "bad_request")
+				return
+			}
+			let eoa = normalizeAddress(String(entry["eoaAddress"] as? String ?? entry["eoa"] as? String ?? ""))
+			guard isEvmAddress(eoa), userPgp.contains("BEGIN PGP PUBLIC KEY"), routerPgp.contains("BEGIN PGP PUBLIC KEY") else {
+				dropped += 1
+				continue
+			}
+			if byEoa[eoa] == nil { order.append(eoa) }
+			byEoa[eoa] = ["eoaAddress": eoa, "userPublicKeyArmored": userPgp, "routerArmoredPublicKey": routerPgp]
+		}
+		s.routes = order.compactMap { byEoa[$0] }
+		emitEvent(["type": "event:log", "level": "info", "message": "setRoutes kept=\(order.count) dropped=\(dropped)"])
+		reply(true, nil, ["accepted": order.count, "dropped": dropped])
+		flushQueuedReceipts(session: s)
+	}
+
+	private static func isEvmAddress(_ a: String) -> Bool {
+		a.count == 42 && a.hasPrefix("0x") && a.dropFirst(2).allSatisfy { $0.isHexDigit }
 	}
 
 	private static func handleSetNodes(_ body: [String: Any]) {
@@ -3814,11 +3971,14 @@ public enum BeamioConetChatModule {
 			return
 		}
 		guard let initiated = initiationGeneration(s, body: body) else {
+			(body["_receiptDone"] as? () -> Void)?()
 			ack(reqId, ok: false, error: "bad_request")
 			return
 		}
+		let receiptDone = body["_receiptDone"] as? () -> Void
 		let reply = BeamioInFlightReply(timeout: inFlightTimeout, isCurrent: { BeamioInboxIO.generation == initiated }) { ok, result, error in
 			ack(reqId, ok: ok, result: result, error: error)
+			receiptDone?()
 		}
 		let payload = String(body["payload"] as? String ?? "")
 		let sendId = String(body["sendId"] as? String ?? UUID().uuidString)
@@ -3854,6 +4014,7 @@ public enum BeamioConetChatModule {
 		let host = BeamioOpenPgpHost.shared
 		// before signing.
 		guard BeamioInboxIO.generation == initiated else {
+			receiptDone?()
 			s.forgetSend(sendId)
 			return
 		}
@@ -3876,6 +4037,7 @@ public enum BeamioConetChatModule {
 						func postInner(_ finalArmor: String) {
 							// /: before the POST.
 							guard BeamioInboxIO.generation == initiated else {
+								receiptDone?()
 								s.forgetSend(sendId)
 								return
 							}
@@ -4719,6 +4881,7 @@ public enum BeamioConetChatModule {
 		session?.pendingLock.lock()
 		session?.pendingAcks = [:]
 		session?.pendingLock.unlock()
+		session?.clearReceiptState()
 		session?.history?.destroy()
 		session?.history = nil
 		session = nil
@@ -5133,25 +5296,166 @@ public enum BeamioConetChatModule {
 		}
 	}
 
-	private static func sendSenderReceipt(session: Session, plaintext: String, armorHash: String, from: String) {
-		guard let route = session.routes.first(where: {
-			normalizeAddress(String($0["eoaAddress"] as? String ?? $0["eoa"] as? String ?? "")) == from.lowercased()
-		}),
-		let userPgp = route["userPublicKeyArmored"] as? String,
-		userPgp.contains("BEGIN PGP PUBLIC KEY")
-		else { return }
+	/// The sendId of an ordinary one-to-one chat message that earns a delivery receipt, or nil. The envelope is
+	/// unwrapped like the page's extractInboundSendId: at most 6 layers, a string is parsed as JSON, an object with a string `text` is unwrapped
+	/// further. Every layer's top-level fields are checked: `type`, `groupId`, `reply` or `callRecord` (receipt, call control, group, reaction,
+	/// payment request controls, call record) earn no receipt; neither does a failed unwrap, an unknown shape, a depth over 6 or a missing
+	/// sendId. Text, quote, voiceMessage, fileMessage (image, video, PDF, archive) and paymentCard do. A `type` nested inside a manifest
+	/// (voiceMessage.type, fileMessage.type) is not a top-level field and does not exclude. Internal for the tests.
+	static func receiptEligibleSendId(plaintext: String) -> String? {
+		if BeamioConetChatCallControl.parse(plaintext) != nil { return nil }
+		let maxLayers = 6
+		let excluded = ["type", "groupId", "reply", "callRecord"]
+		var current = plaintext
+		var layers = 0
+		var sendId: String?
+		var first = true
+		while true {
+			guard let data = current.trimmingCharacters(in: .whitespacesAndNewlines).data(using: .utf8),
+			      let parsed = try? JSONSerialization.jsonObject(with: data)
+			else {
+				// the first value must be a JSON object; a deeper value that is not an object is the user's text (a leaf) and ends the unwrap
+				if first { return nil }
+				break
+			}
+			guard let obj = parsed as? [String: Any] else {
+				if first { return nil }
+				break
+			}
+			for key in excluded {
+				if let v = obj[key], !(v is NSNull) { return nil }
+			}
+			// the signed envelope the listen decrypted ({timestamp, text, from, signMessage}) is not a layer: layer 1 is the payload in its `text`
+			// It is still checked for the excluded fields above.
+			let isEnvelope = first && obj["signMessage"] != nil
+			first = false
+			if !isEnvelope {
+				layers += 1
+				if layers > maxLayers { return nil }
+				if layers == 1 {
+					// layer 1 must carry a non-empty sendId
+					guard let id = obj["sendId"] as? String, !id.isEmpty else { return nil }
+					sendId = id
+				}
+			}
+			guard let text = obj["text"] as? String else { break }
+			current = text
+		}
+		return sendId
+	}
 
-		let sendId = extractSendId(from: plaintext) ?? ""
+	/// The delivery receipt of a displayed message. Once per armorHash. Without a route for the sender it waits in a
+	/// memory queue (128, 10 minutes, no plaintext) until a `setRoutes` brings one.
+	static func sendSenderReceipt(session: Session, plaintext: String, armorHash: String, from: String) {
+		guard let sendId = receiptEligibleSendId(plaintext: plaintext) else { return }
+		let gen = BeamioInboxIO.generation
+		session.receiptLock.lock()
+		if session.receiptedHashes.contains(armorHash) {
+			session.receiptLock.unlock()
+			return
+		}
+		let pairKey = from.lowercased() + "|" + sendId
+		if session.receiptedKeys.contains(pairKey) {
+			session.receiptLock.unlock()
+			return
+		}
+		session.receiptedHashes.append(armorHash)
+		if session.receiptedHashes.count > 1024 { session.receiptedHashes.removeFirst(session.receiptedHashes.count - 1024) }
+		session.receiptedKeys.append(pairKey)
+		if session.receiptedKeys.count > 1024 { session.receiptedKeys.removeFirst(session.receiptedKeys.count - 1024) }
+		session.receiptLock.unlock()
+		if let route = receiptRoute(session: session, from: from) {
+			postReceipt(session: session, route: route, sendId: sendId, armorHash: armorHash)
+			return
+		}
+		session.receiptLock.lock()
+		session.receiptQueue.append((from.lowercased(), sendId, armorHash, Date(), gen))
+		if session.receiptQueue.count > receiptQueueMax { session.receiptQueue.removeFirst(session.receiptQueue.count - receiptQueueMax) }
+		session.receiptLock.unlock()
+	}
+
+	private static func receiptRoute(session: Session, from: String) -> [String: Any]? {
+		let key = from.lowercased()
+		return session.routes.first(where: {
+			normalizeAddress(String($0["eoaAddress"] as? String ?? $0["eoa"] as? String ?? "")) == key
+		})
+	}
+
+	/// After a `setRoutes`: the queued receipts whose sender now has a route go out; the expired and the stale ones are dropped.
+	static func flushQueuedReceipts(session: Session, now: Date = Date()) {
+		let gen = BeamioInboxIO.generation
+		session.receiptLock.lock()
+		let queued = session.receiptQueue
+		session.receiptQueue = []
+		session.receiptLock.unlock()
+		var keep: [(from: String, sendId: String, armorHash: String, at: Date, generation: Int)] = []
+		for item in queued {
+			if now.timeIntervalSince(item.at) > receiptQueueTTL || item.generation != gen { continue }
+			if let route = receiptRoute(session: session, from: item.from) {
+				postReceipt(session: session, route: route, sendId: item.sendId, armorHash: item.armorHash)
+			} else {
+				keep.append(item)
+			}
+		}
+		if !keep.isEmpty {
+			session.receiptLock.lock()
+			session.receiptQueue = keep + session.receiptQueue
+			session.receiptLock.unlock()
+		}
+	}
+
+	static let receiptMaxInFlight = 2
+
+	/// A receipt waits for one of two in-flight places, so a batch ackInbound cannot occupy the signer and the OpenPGP page; the outbox shares the
+	/// 128 limit with the route queue (the oldest is dropped). A user's own send does not go through here.
+	static func postReceipt(session: Session, route: [String: Any], sendId: String, armorHash: String) {
+		session.receiptLock.lock()
+		session.receiptOutbox.append((route, sendId, armorHash))
+		if session.receiptOutbox.count > receiptQueueMax { session.receiptOutbox.removeFirst(session.receiptOutbox.count - receiptQueueMax) }
+		session.receiptLock.unlock()
+		pumpReceipts(session: session)
+	}
+
+	private static func pumpReceipts(session: Session) {
+		while true {
+			session.receiptLock.lock()
+			guard session.receiptInFlight < receiptMaxInFlight, !session.receiptOutbox.isEmpty, !session.destroyed else {
+				session.receiptLock.unlock()
+				return
+			}
+			let item = session.receiptOutbox.removeFirst()
+			session.receiptInFlight += 1
+			session.receiptLock.unlock()
+			let once = NSLock()
+			var released = false
+			let release: () -> Void = {
+				once.lock()
+				if released { once.unlock(); return }
+				released = true
+				once.unlock()
+				session.receiptLock.lock()
+				if session.receiptInFlight > 0 { session.receiptInFlight -= 1 }
+				session.receiptLock.unlock()
+				pumpReceipts(session: session)
+			}
+			sendReceiptNow(session: session, item: item, release: release)
+		}
+	}
+
+	/// The wire format is unchanged: outer {sendId, from:"me", text, createdAt}; inner {type, sendId, armorHash, deliveredAt, from}.
+	private static func sendReceiptNow(
+		session: Session, item: (route: [String: Any], sendId: String, armorHash: String), release: @escaping () -> Void
+	) {
 		let receiptInner: [String: Any] = [
 			"type": "beamio_chat_delivery_receipt_v1",
-			"sendId": sendId,
-			"armorHash": armorHash,
+			"sendId": item.sendId,
+			"armorHash": item.armorHash,
 			"deliveredAt": Int(Date().timeIntervalSince1970 * 1000),
 			"from": session.eoa,
 		]
 		guard let receiptData = try? JSONSerialization.data(withJSONObject: receiptInner),
 		      let receiptJson = String(data: receiptData, encoding: .utf8)
-		else { return }
+		else { release(); return }
 		let pending: [String: Any] = [
 			"sendId": UUID().uuidString,
 			"from": "me",
@@ -5160,16 +5464,34 @@ public enum BeamioConetChatModule {
 		]
 		guard let pendingData = try? JSONSerialization.data(withJSONObject: pending),
 		      let pendingJson = String(data: pendingData, encoding: .utf8)
-		else { return }
-		handleSend([
+		else { release(); return }
+		// A deferAck page's session takes a send only with the generation it was started in (`initiationGeneration`); a receipt that carried none
+		// was answered bad_request on reqId -1, which is not delivered, so the receipt never left. The receipt is started now, in the current generation.
+		let body: [String: Any] = [
 			"reqId": -1,
-			"to": route,
+			"to": item.route,
 			"payload": pendingJson,
 			"sendId": UUID().uuidString,
 			"beamioNoPush": true,
-		])
+			"inboundGeneration": BeamioInboxIO.generation,
+		]
+		if let hook = receiptSendHook {
+			hook(body, release)
+			return
+		}
+		// a watchdog frees the place if the send never answers.
+		DispatchQueue.main.asyncAfter(deadline: .now() + 60) { release() }
+		var withDone = body
+		withDone["_receiptDone"] = release
+		handleSend(withDone)
 	}
 
+#if BEAMIO_TEST_HOOKS
+	/// Test build only: replaces the network send; the hook must call its `release` when the pretend send ends.
+	static var receiptSendHook: (([String: Any], @escaping () -> Void) -> Void)?
+#else
+	static let receiptSendHook: (([String: Any], @escaping () -> Void) -> Void)? = nil
+#endif
 
 	/// (3): the error a page command answers with when a signature was refused. A signer that is not the session's account gives
 	/// `signer_mismatch`; any other failure keeps its own message (or `fallback`).
@@ -5387,6 +5709,11 @@ public enum BeamioConetChatModule {
 		else { return false }
 		let candidate = AddressPGPChain.Configuration(contract: contract, chainId: chainId, rpcURL: rpc)
 		guard candidate.isUsable else { return false }
+		// the account registry (the owner of a BeamioTag), when the page's init declares it: an unusable value does not replace an earlier one
+		if let registry = (payload["accountRegistryAddress"] as? String) ?? (payload["beamioAccountRegistryAddress"] as? String),
+		   registry.hasPrefix("0x"), registry.count == 42, registry.dropFirst(2).allSatisfy({ $0.isHexDigit }) {
+			AddressPGPChain.registryContract = registry
+		}
 		AddressPGPChain.configuration = candidate
 		return true
 	}

@@ -49,6 +49,12 @@ enum BeamioMnemonicSets {
 
 	static func readSet(store: BeamioChatRawItemStoring, eoa rawEoa: String) -> SetRead {
 		let eoa = rawEoa.lowercased()
+		// a plaintext set that the passcode state has replaced is never read again (see `plainRetirement`): it reads as absent whether or not its cleanup finished
+		switch plainRetirement(store: store, eoa: eoa) {
+		case .yes: return .absent
+		case .unknown: return .unreadable
+		case .no: break
+		}
 		switch store.rawRead(account: setName(eoa)) {
 		case .absent: return .absent
 		case .unreadable: return .unreadable
@@ -107,6 +113,234 @@ enum BeamioMnemonicSets {
 		guard let names = raw.rawAccountNames() else { return nil }
 		let owners = Set(names.compactMap { cipherVersionOwner(inAccount: $0)?.lowercased() })
 		return orphanVersionsBlock(owners: owners, cleared: BeamioIdentityCleared.read(store: store))
+	}
+
+	// MARK: - Retiring the plaintext set once the passcode state holds the account
+
+	/// The cleanup record of one account: `mnemonic.retire.<eoa>`. It holds no secret: the version, the address and the state (`pending`, then `done`). It is written before the
+	/// plaintext set is deleted and stays as the tombstone, so a restart can finish the cleanup and the plaintext is never read in between.
+	static let retirePrefix = "mnemonic.retire."
+
+	static func retireName(_ eoa: String) -> String { retirePrefix + eoa.lowercased() }
+
+	private static func retireBytes(eoa: String, state: String) -> Data? {
+		try? JSONSerialization.data(withJSONObject: ["v": formatVersion, "eoa": eoa.lowercased(), "state": state], options: [.sortedKeys])
+	}
+
+	enum Retirement: Equatable {
+		case yes, no, unknown
+	}
+
+	/// What `mnemonic.current` names, for the retirement rule.
+	private enum PointerKind: Equatable {
+		case cipher(String)
+		case plain(String)
+		case other
+		case unreadable
+	}
+
+	private static func pointerKind(store: BeamioChatRawItemStoring) -> PointerKind {
+		switch store.rawRead(account: currentName) {
+		case .unreadable: return .unreadable
+		case .absent: return .other
+		case .present(let bytes):
+			guard let object = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any], let eoa = (object["eoa"] as? String)?.lowercased(), !eoa.isEmpty else { return .other }
+			return object["kind"] as? String == "cipher" ? .cipher(eoa) : .plain(eoa)
+		}
+	}
+
+	/// Whether the plaintext set of `eoa` is retired: the passcode state replaced it, so it is never read again, never returned and never a key source. It is decided by the pointer, not by
+	/// whether the plaintext item is still there: a pointer that names this account's v3 record retires it (the cleanup may not have run, or may have been interrupted); a pointer that names
+	/// this very plaintext set keeps it (a native import chose it again); with any other pointer the cleanup record decides. An unreadable pointer or record is unknown (never "retired" and
+	/// never "kept"): the caller reads it as a read failure.
+	static func plainRetirement(store: BeamioChatRawItemStoring, eoa rawEoa: String) -> Retirement {
+		let eoa = rawEoa.lowercased()
+		switch pointerKind(store: store) {
+		case .cipher(let named) where named == eoa: return .yes
+		case .plain(let named) where named == eoa: return .no
+		case .unreadable: return .unknown
+		default:
+			switch store.rawRead(account: retireName(eoa)) {
+			case .present(let bytes): return retireState(bytes) == reselectedState ? .no : .yes
+			case .absent: return .no
+			case .unreadable: return .unknown
+			}
+		}
+	}
+
+	/// How the older device copies of an account (`mnemonic:<eoa>` and `walletKey:<eoa>`) are seen once the passcode state may hold the account. `retired`: the v3 record is verified, the copies
+	/// read as absent whether or not their deletion finished. `retiredUnverified`: the pointer retires them but the v3 record does not read back, so they are neither returned nor called absent
+	/// (an unreadable item, never "no account"). `unknown`: the pointer or the cleanup record cannot be read (also unreadable). `live`: every other account, unchanged.
+	enum LegacyView: Equatable {
+		case live, retired, retiredUnverified, unknown
+	}
+
+	static func legacyView(store: BeamioChatRawItemStoring, eoa rawEoa: String) -> LegacyView {
+		let eoa = rawEoa.lowercased()
+		// the older copies are retired only by their own record, written once the v3 record was unlocked and its key derived this very address (`retireLegacy`). A v3 record that only
+		// came in without a passcode proves nothing, so it retires nothing.
+		switch store.rawRead(account: legacyRetireName(eoa)) {
+		case .absent: return .live
+		case .unreadable: return .unknown
+		case .present: return cipherVerified(store: store, eoa: eoa) ? .retired : .retiredUnverified
+		}
+	}
+
+	/// The cleanup record of the older device copies of one account: `mnemonic.legacyretire.<eoa>`. No secret: the version, the address and the state (`pending`, then `done`). It is written only
+	/// after the unlock of the v3 record proved the address, and it stays as the tombstone.
+	static let legacyRetirePrefix = "mnemonic.legacyretire."
+
+	static func legacyRetireName(_ eoa: String) -> String { legacyRetirePrefix + eoa.lowercased() }
+
+	/// Retires the older device copies of `eoa`: the wrapped mnemonic item (with its credential key) and the wallet key record. It needs all of: the v3 record reads back (`cipherVerified`), and
+	/// either the account is unlocked now with a held key that derives this very address, or the cleanup record already exists (an earlier unlock proved it). Then, in order: the cleanup record,
+	/// the deletions, the `done` mark. Any failure leaves the record and the copies, hidden (see `legacyView`), and the next call continues. True when the copies are gone.
+	@discardableResult
+	static func retireLegacy(eoa rawEoa: String, store: BeamioChatRawItemStoring) -> Bool {
+		let eoa = rawEoa.lowercased()
+		let record = store.rawRead(account: legacyRetireName(eoa))
+		if case .unreadable = record { return false }
+		var haveRecord = false
+		if case .present = record { haveRecord = true }
+		guard cipherVerified(store: store, eoa: eoa) else { return false }
+		if !haveRecord {
+			// first time: the proof of the address comes from the unlocked session
+			guard var held = BeamioCipherUnlock.key(eoa: eoa) else { return false }
+			defer { BeamioNativeWallet.wipe(&held) }
+			guard BeamioNativeEthSigner.address(privateKey: [UInt8](held))?.lowercased() == eoa else { return false }
+			// nothing to retire and no record to keep when the account has no older copies
+			let names = ["mnemonic:" + eoa, "walletKey:" + eoa]
+			var any = false
+			for name in names {
+				switch store.rawRead(account: name) {
+				case .unreadable: return false
+				case .present: any = true
+				case .absent: break
+				}
+			}
+			guard any else { return true }
+			if retireFault("intent") { return false }
+			guard let pending = retireBytes(eoa: eoa, state: "pending"), store.rawWrite(account: legacyRetireName(eoa), bytes: pending),
+			      case .present(let back) = store.rawRead(account: legacyRetireName(eoa)), back == pending else { return false }
+		}
+		if retireFault("delete") { return false }
+		if retireFault("deleteCall") { return false }
+		guard store.deleteRetiredLegacyItems(eoa: eoa) else { return false }
+		for name in ["mnemonic:" + eoa, "walletKey:" + eoa] { guard case .absent = store.rawRead(account: name) else { return false } }
+		if retireFault("done") { return false }
+		if let done = retireBytes(eoa: eoa, state: "done") { _ = store.rawWrite(account: legacyRetireName(eoa), bytes: done) }
+		return true
+	}
+
+	/// The state word of a cleanup record. `reselected`: the plaintext set was chosen again by a native import, so the record no longer retires it.
+	static let reselectedState = "reselected"
+
+	private static func retireState(_ bytes: Data) -> String? {
+		(try? JSONSerialization.jsonObject(with: bytes) as? [String: Any])?["state"] as? String
+	}
+
+	/// The v3 record of `eoa` is there and good: the pointer names it and `current` reads it back (the version item present, its format and address valid), or, with another pointer,
+	/// at least one version item of the account reads back and passes the format check. Nothing is written. A deletion of the plaintext needs this, never only the pointer.
+	private static func cipherVerified(store: BeamioChatRawItemStoring, eoa: String) -> Bool {
+		if case .cipher(let named, _) = current(store: store), named == eoa { return true }
+		if case .cipher(let named) = pointerKind(store: store), named == eoa { return false }   // the pointer names this account's v3 record and it does not read back
+		guard let names = store.rawAccountNames() else { return false }
+		let prefix = setName(eoa) + ".c."
+		for name in names where name.hasPrefix(prefix) {
+			guard case .present(let bytes) = store.rawRead(account: name),
+			      let record = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any], record["v"] as? Int == formatVersion,
+			      record["mode"] as? String == "cipher", (record["eoa"] as? String)?.lowercased() == eoa,
+			      let envelope = record["envelope"] as? [String: Any], let parsed = BeamioMnemonicCipherV3.parse(envelope), parsed.eoa == eoa,
+			      name == cipherItemName(parsed) else { continue }
+			return true
+		}
+		return false
+	}
+
+	#if BEAMIO_TEST_HOOKS
+	/// Test only: a failure injected at one step of the cleanup. The step does not run and the cleanup reports failure; nothing else changes. `reselectMarkFails` fails the deletion of the
+	/// old record and the mark that replaces it.
+	enum RetireFault: Equatable {
+		case beforeIntent, beforeDelete, deleteFails, beforeDoneMark, reselectDeleteFails, reselectMarkFails
+	}
+	static var retireFaultForTests: RetireFault?
+	#endif
+
+	private static func retireFault(_ stage: String) -> Bool {
+		#if BEAMIO_TEST_HOOKS
+		switch (retireFaultForTests, stage) {
+		case (.beforeIntent?, "intent"), (.beforeDelete?, "delete"), (.deleteFails?, "deleteCall"), (.beforeDoneMark?, "done"),
+		     (.reselectDeleteFails?, "reselectDelete"), (.reselectMarkFails?, "reselectDelete"), (.reselectMarkFails?, "reselectMark"): return true
+		default: return false
+		}
+		#else
+		return false
+		#endif
+	}
+
+	/// Deletes the plaintext set of `eoa` after the passcode state holds the account: the cleanup record first (no secret), then the plaintext item, then the `done` mark. True when the
+	/// plaintext is gone. Any failure leaves the record, so the next call (a repeated sync, or the next start) continues; nothing here moves the pointer, writes a phrase or returns one.
+	/// Runs only while the pointer names this account's v3 record, or the cleanup record already exists and the pointer does not name the plaintext set.
+	@discardableResult
+	static func retirePlain(eoa rawEoa: String, store: BeamioChatRawItemStoring) -> Bool {
+		let eoa = rawEoa.lowercased()
+		switch pointerKind(store: store) {
+		case .cipher(let named) where named == eoa: break
+		case .plain(let named) where named == eoa: return false
+		case .unreadable: return false
+		default:
+			guard case .present(let bytes) = store.rawRead(account: retireName(eoa)), retireState(bytes) != reselectedState else { return false }
+		}
+		// the ciphertext is verified before anything is written or deleted: without a v3 record that reads back, the plaintext stays (it is still never read, see `plainRetirement`)
+		// and the cleanup is tried again later
+		guard cipherVerified(store: store, eoa: eoa) else { return false }
+		// the record of the intent (a record left as `reselected` becomes `pending` again)
+		switch store.rawRead(account: retireName(eoa)) {
+		case .unreadable: return false
+		case .present(let bytes):
+			if retireState(bytes) == reselectedState {
+				guard let pending = retireBytes(eoa: eoa, state: "pending"), store.rawWrite(account: retireName(eoa), bytes: pending),
+				      case .present(let back) = store.rawRead(account: retireName(eoa)), back == pending else { return false }
+			}
+		case .absent:
+			if retireFault("intent") { return false }
+			guard let pending = retireBytes(eoa: eoa, state: "pending"), store.rawWrite(account: retireName(eoa), bytes: pending),
+			      case .present(let back) = store.rawRead(account: retireName(eoa)), back == pending else { return false }
+		}
+		// the plaintext item
+		switch store.rawRead(account: setName(eoa)) {
+		case .unreadable: return false
+		case .absent: break
+		case .present(var bytes):
+			bytes.removeAll()
+			if retireFault("delete") { return false }
+			if retireFault("deleteCall") { return false }
+			guard store.deleteRetiredPlainSet(eoa: eoa), case .absent = store.rawRead(account: setName(eoa)) else { return false }
+		}
+		if retireFault("done") { return false }
+		if let done = retireBytes(eoa: eoa, state: "done") { _ = store.rawWrite(account: retireName(eoa), bytes: done) }
+		return true
+	}
+
+	/// Finishes every cleanup that a restart or a failure left: for each plaintext set that is retired, run the cleanup again. Reads only names and the pointer unless a set is retired.
+	static func resumeRetire(store: BeamioChatRawItemStoring) {
+		guard let names = store.rawAccountNames() else { return }
+		var owners = Set(names.compactMap { setOwner(inAccount: $0) })
+		for name in names {
+			for prefix in ["mnemonic:", "walletKey:"] where name.hasPrefix(prefix) { owners.insert(String(name.dropFirst(prefix.count)).lowercased()) }
+		}
+		for owner in owners.sorted() where plainRetirement(store: store, eoa: owner) == .yes {
+			retirePlain(eoa: owner, store: store)
+		}
+		// the older copies: only where their own record exists, or the account is unlocked now
+		var legacyOwners = Set(names.compactMap { name -> String? in name.hasPrefix(legacyRetirePrefix) ? String(name.dropFirst(legacyRetirePrefix.count)).lowercased() : nil })
+		for name in names {
+			for prefix in ["mnemonic:", "walletKey:"] where name.hasPrefix(prefix) {
+				let owner = String(name.dropFirst(prefix.count)).lowercased()
+				if BeamioCipherUnlock.isUnlocked(eoa: owner) { legacyOwners.insert(owner) }
+			}
+		}
+		for owner in legacyOwners.sorted() { retireLegacy(eoa: owner, store: store) }
 	}
 
 	private static func setBytes(eoa: String, phrase: Data, utc: String) -> Data? {
@@ -171,7 +405,12 @@ enum BeamioMnemonicSets {
 	static func saveCipher(envelope: BeamioMnemonicCipherV3.Envelope, store: BeamioChatRawItemStoring, utc: String) -> Save {
 		let saved = saveCipherCore(envelope: envelope, store: store, utc: utc)
 		// a successful pwaWalletSync commit (written and read back) ends this account's `identity_cleared` ignore
-		if saved == .updated || saved == .idempotent { BeamioIdentityCleared.lift(envelope.eoa, store: store) }
+		if saved == .updated || saved == .idempotent {
+			BeamioIdentityCleared.lift(envelope.eoa, store: store)
+			// the v3 record is written, read back and named by the pointer: the old plaintext set of the account is retired and deleted silently. A failure of the cleanup is not a failure of the
+			// save: the plaintext is already out of use (`plainRetirement`), and the next sync or start finishes the deletion.
+			retirePlain(eoa: envelope.eoa, store: store)
+		}
 		return saved
 	}
 
@@ -237,6 +476,13 @@ enum BeamioMnemonicSets {
 		if saved == .updated || saved == .idempotent, var derived = BeamioPwaWalletSync.derivedAccount(phrase: text) {
 			BeamioNativeWallet.wipe(&derived.key)
 			BeamioIdentityCleared.lift(derived.eoa, store: store)
+			// the pointer names this plaintext set again: an older cleanup record of the account no longer applies. It is deleted, or, when it cannot be, marked `reselected`, so the cleanup
+			// rule skips it. If neither works the save is not complete (the same save again retries it).
+			let name = retireName(derived.eoa)
+			var cleared = !retireFault("reselectDelete") && store.rawDelete(account: name)
+			if !cleared, let mark = retireBytes(eoa: derived.eoa, state: reselectedState), !retireFault("reselectMark"), store.rawWrite(account: name, bytes: mark),
+			   case .present(let back) = store.rawRead(account: name), back == mark { cleared = true }
+			if !cleared { return .failed("internal_state") }
 		}
 		return saved
 	}

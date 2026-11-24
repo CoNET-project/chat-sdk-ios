@@ -662,7 +662,7 @@ extension BeamioPasscodeWalletStore: BeamioChatRawItemStoring {
 		if account.hasPrefix(passcodeRawKeyPrefix) {
 			return String(account.dropFirst(passcodeRawKeyPrefix.count)).lowercased()
 		}
-		for prefix in ["mnemonic:", "intent:", "commit:", "walletKey:"] where account.hasPrefix(prefix) {
+		for prefix in ["mnemonic:", "intent:", "commit:", "walletKey:", BeamioMnemonicSets.retirePrefix, BeamioMnemonicSets.legacyRetirePrefix] where account.hasPrefix(prefix) {
 			return String(account.dropFirst(prefix.count)).lowercased()
 		}
 		return setItemOwner(inRawAccount: account)
@@ -714,6 +714,24 @@ extension BeamioPasscodeWalletStore: BeamioChatRawItemStoring {
 	}
 
 	public func rawAccountNames() -> [String]? { rawLegacyStore?.rawAccountNames() }
+
+	/// The one deletion of a set item that this store allows: the plaintext set of an account whose cleanup record exists (`mnemonic.retire.<eoa>`, written before this call). It never deletes a v3 version or
+	/// the pointer, and nothing without the record.
+	public func deleteRetiredPlainSet(eoa rawEoa: String) -> Bool {
+		let eoa = rawEoa.lowercased()
+		guard let rawLegacyStore, case .present = rawLegacyStore.rawRead(account: BeamioMnemonicSets.retireName(eoa)),
+		      !session.isLocked(eoa: eoa) else { return false }
+		return rawLegacyStore.rawDelete(account: BeamioMnemonicSets.setName(eoa))
+	}
+
+	/// The deletion of the older device copies of an account whose cleanup record exists: `mnemonic:<eoa>` (with its credential key) and `walletKey:<eoa>`. Nothing without the record, and never
+	/// a passcode record, a v3 version or the pointer.
+	public func deleteRetiredLegacyItems(eoa rawEoa: String) -> Bool {
+		let eoa = rawEoa.lowercased()
+		guard let rawLegacyStore, case .present = rawLegacyStore.rawRead(account: BeamioMnemonicSets.legacyRetireName(eoa)),
+		      !session.isLocked(eoa: eoa) else { return false }
+		return rawLegacyStore.deleteRetiredLegacyItems(eoa: eoa)
+	}
 
 	public func rawRead(account: String) -> BeamioChatRawItem {
 		if let eoa = isPasscodeRecordAccount(account) {
