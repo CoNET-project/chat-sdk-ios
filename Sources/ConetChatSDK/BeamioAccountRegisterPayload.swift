@@ -8,9 +8,19 @@ import Foundation
 /// The password and the phrase stay in memory for this call only: nothing is stored, logged or returned except the records that hide them. The recover code is returned once, for
 /// the user to keep. The registry is read first (both endpoints, one block): a name that another account holds is `tag_taken`; a registry that cannot be read is `not_ready`, never
 /// `tag_taken`, and nothing is made. The signature is over the exact `wallet` string that is returned (the Cluster checks the signature against the wallet text it receives).
-/// Only a QA build (and the test build) enables the command; any other build answers `not_available`.
+/// The command is enabled in every build (`registerEnabled`); the first-identity registration keeps its own gate (`enabled`) and stays QA-only.
 enum BeamioNewAccountFeature {
-	/// The new-account registration is enabled in a QA build only, until its acceptance (the production build answers `not_available` and starts nothing).
+	/// The `accountCreateRegister` command. Enabled in every build since 0.1.12; it needs a native account that the shell's create step already made, and
+	/// it only reads the registry and builds the payload (the native layer never posts). A test build follows `enabledForTests`, so the refusal can be tested.
+	static var registerEnabled: Bool {
+		#if BEAMIO_TEST_HOOKS
+		return enabledForTests
+		#else
+		return true
+		#endif
+	}
+	/// The first-identity registration (and its status events) is enabled in a QA build only, until its acceptance (the production build starts nothing).
+	/// Not the gate of `accountCreateRegister`: that is `registerEnabled`.
 	static var enabled: Bool {
 		#if BEAMIO_QA_BUILD
 		return true

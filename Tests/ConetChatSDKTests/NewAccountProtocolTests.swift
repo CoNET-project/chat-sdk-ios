@@ -29,6 +29,7 @@ final class NewAccountProtocolTests: XCTestCase {
 	private var savedVault: BeamioPasscodeVault?
 	private var savedMemory: BeamioChatPgpKeychain.MemoryRecords?
 	private var savedRegistryOwner: ((String) -> Result<AddressPGPChain.RegistryOwner, Error>)!
+	private var passcodeRecords: Records!
 
 	override func setUp() {
 		super.setUp()
@@ -41,7 +42,8 @@ final class NewAccountProtocolTests: XCTestCase {
 		XCTAssertTrue(store.writeItem(.mnemonic, eoa: eoa, value: Data(phrase.utf8)))
 		BeamioNativeWallet.keyStore = store
 		// no passcode on the account: not locked
-		BeamioPasscodeSession.shared.vault = BeamioPasscodeVault(records: Records(), hardware: Hardware())
+		passcodeRecords = Records()
+		BeamioPasscodeSession.shared.vault = BeamioPasscodeVault(records: passcodeRecords, hardware: Hardware())
 		BeamioChatPgpKeychain.memory = BeamioChatPgpKeychain.MemoryRecords()
 		BeamioConetChatSignBroker.setSignerEoa(eoa)
 		BeamioConetChatModule.setNativeGateForTests(account: eoa, sessionReady: true)
@@ -390,6 +392,84 @@ final class NewAccountProtocolTests: XCTestCase {
 		XCTAssertEqual(ready["pgpPublicKeyArmored"] as? String, publicA)
 		XCTAssertEqual(ready["ownRouteArmoredPublicKey"] as? String, routeArmor)
 		XCTAssertFalse("\(ready)".contains("PRIVATE KEY"))
+	}
+
+	// MARK: - the gate states of accountCreateRegister
+
+	/// G0, no native account: not_ready (not the gate's no_key); the registry is not read and no payload is made.
+	func testG0NoNativeAccountAnswersNotReadyAndReadsNothing() {
+		BeamioConetChatModule.setNativeGateForTests(account: nil, sessionReady: false)
+		BeamioConetChatSignBroker.clearSigner()
+		var registryReads = 0
+		BeamioAccountRegisterPayload.registryOwner = { _ in registryReads += 1; return .success(.free) }
+		let answer = send(request())
+		XCTAssertEqual(answer["ok"] as? Bool, false)
+		XCTAssertEqual(answer["error"] as? String, "not_ready")
+		XCTAssertNil(answer["result"])
+		XCTAssertEqual(registryReads, 0)
+	}
+
+	/// G1, the state right after nativeAccountCreateOpen: the device has the record, the chat session is not started and no signer is set. The command runs.
+	func testG1NativeAccountWithoutASessionRunsTheCommand() throws {
+		BeamioConetChatModule.setNativeGateForTests(account: eoa, sessionReady: false)
+		BeamioConetChatSignBroker.clearSigner()
+		XCTAssertEqual(BeamioConetChatModule.nativeGate(), .g1)
+		let answer = send(request())
+		XCTAssertEqual(answer["ok"] as? Bool, true, "\(answer)")
+		let result = try XCTUnwrap(answer["result"] as? [String: Any])
+		XCTAssertEqual(result["wallet"] as? String, eoa)
+		XCTAssertEqual(Set(result.keys), ["accountName", "wallet", "signMessage", "recover", "recoverCodeBase58"])
+	}
+
+	/// G2: unchanged.
+	func testG2StillRunsTheCommand() {
+		BeamioConetChatModule.setNativeGateForTests(account: eoa, sessionReady: true)
+		XCTAssertEqual(BeamioConetChatModule.nativeGate(), .g2)
+		XCTAssertEqual(send(request())["ok"] as? Bool, true)
+	}
+
+	/// At G1 the registry is read exactly once for an unlocked record account.
+	func testG1ReadsTheRegistryOnce() {
+		BeamioConetChatModule.setNativeGateForTests(account: eoa, sessionReady: false)
+		var registryReads = 0
+		BeamioAccountRegisterPayload.registryOwner = { _ in registryReads += 1; return .success(.free) }
+		XCTAssertEqual(send(request())["ok"] as? Bool, true)
+		XCTAssertEqual(registryReads, 1)
+	}
+
+	/// A record account whose passcode is set and not unlocked: not_ready, the registry is not read, nothing is made.
+	func testALockedRecordAccountAnswersNotReadyAndReadsNothing() throws {
+		BeamioConetChatModule.setNativeGateForTests(account: eoa, sessionReady: false)
+		BeamioConetChatSignBroker.clearSigner()
+		let record = BeamioPasscodeRecord(mode: "passcode", salt: Data(repeating: 1, count: 16), blob: Data(repeating: 2, count: 32))
+		XCTAssertTrue(passcodeRecords.writeRecord(eoa: eoa, try JSONEncoder().encode(record)))
+		XCTAssertTrue(BeamioPasscodeSession.shared.isLocked(eoa: eoa), "the account is locked")
+		var registryReads = 0
+		BeamioAccountRegisterPayload.registryOwner = { _ in registryReads += 1; return .success(.free) }
+		let answer = send(request())
+		XCTAssertEqual(answer["ok"] as? Bool, false)
+		XCTAssertEqual(answer["error"] as? String, "not_ready")
+		XCTAssertNil(answer["result"])
+		XCTAssertEqual(registryReads, 0)
+	}
+
+	/// Only the create command is gate-exempt: the other key commands are still refused by the gate (G0 no_key, G1 not_ready).
+	func testTheOtherKeyCommandsAreStillRefusedByTheGate() {
+		XCTAssertTrue(BeamioConetChatModule.gateExemptCommands.contains("accountCreateRegister"))
+		let others = ["historySign", "gossipSign", "walletSignMessage", "walletSignTypedData", "walletTransfer", "deriveSubkeys", "ephemeralSign"]
+		for type in others { XCTAssertFalse(BeamioConetChatModule.gateExemptCommands.contains(type), type) }
+		BeamioConetChatSignBroker.clearSigner()
+		BeamioConetChatModule.setNativeGateForTests(account: nil, sessionReady: false)
+		for (index, type) in others.enumerated() {
+			let answer = send(["type": type, "reqId": 9000 + index])
+			XCTAssertEqual(answer["error"] as? String, "no_key", "\(type) at G0")
+		}
+		BeamioConetChatModule.setNativeGateForTests(account: eoa, sessionReady: false)
+		XCTAssertEqual(BeamioConetChatModule.nativeGate(), .g1)
+		for (index, type) in others.enumerated() {
+			let answer = send(["type": type, "reqId": 9100 + index])
+			XCTAssertEqual(answer["error"] as? String, "not_ready", "\(type) at G1")
+		}
 	}
 }
 #endif

@@ -290,6 +290,10 @@ public enum BeamioConetChatModule {
 		"shellRecordRead", "shellRecordWrite",
 		// the silent cleanup judges its own gate (v196 section 216, CU-06): a gate that is not passed (no key, not ready, locked) answers not_ready and deletes nothing.
 		"accountCleanupOld",
+		// accountCreateRegister runs right after nativeAccountCreateOpen, when the device has a native account
+		// and no chat session yet (G1). The gate must not answer no_key (G0) or not_ready (G1) for it; the command judges the record account itself and answers
+		// not_ready when there is none.
+		"accountCreateRegister",
 	]
 	/// The family commands that a storage-derived Locked answers `not_ready` at G2: C1 to C5, W7, N0 to N4, the PGP decrypt and
 	/// the PGP restore and create commands. `chatRouteRegister` (W5 by bridge name) is judged in its own answer path.
@@ -634,10 +638,13 @@ public enum BeamioConetChatModule {
 			return
 		}
 		// not enabled in this build: nothing else is looked at
-		guard BeamioNewAccountFeature.enabled else { return createRegisterRefuse(echo, "not_available") }
+		guard BeamioNewAccountFeature.registerEnabled else { return createRegisterRefuse(echo, "not_available") }
 		guard Set(body.keys) == ["type", "reqId", "tag", "password"], let tag = body["tag"] as? String, let password = body["password"] as? String else { return createRegisterRefuse(echo, "bad_request") }
-		let account = BeamioConetChatSignBroker.currentSignerEoa().lowercased()
-		guard !account.isEmpty, !BeamioPasscodeSession.shared.isLocked(eoa: account) else { return createRegisterRefuse(echo, "not_ready") }
+		// The account is the device's native record account (the one nativeAccountCreateOpen made), not the chat session's signer: the session does not exist yet
+		// at this step (G1). With no record account nothing is read and nothing is made: not_ready.
+		guard let recordAccount = recordAccount() else { return createRegisterRefuse(echo, "not_ready") }
+		let account = recordAccount.lowercased()
+		guard !BeamioPasscodeSession.shared.isLocked(eoa: account) else { return createRegisterRefuse(echo, "not_ready") }
 		createRegisterLock.lock()
 		let started = createRegisterRunning.insert(account).inserted
 		createRegisterLock.unlock()
@@ -649,7 +656,8 @@ public enum BeamioConetChatModule {
 				switch outcome {
 				case .success(let result): emitEvent(BeamioChatRouteRegister.ackEnvelope(reqId: echo, result: result, error: nil))
 				case .failure(let failure):
-					// `already_registered` is not in the table of the protocol: the page reads an unknown code as failed. Reported to the interface seat.
+					// The failure code goes to the page as it is. `already_registered` is in the code table: the registry names this account as the owner
+					// of the tag, so the page does not call addUser and shows no recover code; it is not `tag_taken` (another owner) and not `not_ready` (a registry that could not be read).
 					emitEvent(BeamioChatRouteRegister.ackEnvelope(reqId: echo, result: nil, error: failure.code))
 				}
 			}

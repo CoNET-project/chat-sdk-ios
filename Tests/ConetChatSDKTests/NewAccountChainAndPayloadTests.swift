@@ -306,8 +306,8 @@ final class NewAccountChainAndPayloadTests: XCTestCase {
 		XCTAssertFalse(phrase.split(separator: " ").contains { $0.count > 4 && log.contains($0) })
 	}
 
-	/// At G0 the command is refused by the gate before anything is read (no key).
-	func testTheCommandAtG0IsRefusedByTheGate() {
+	/// At G0 (no native account) the command answers not_ready, not the gate's no_key, before anything is read.
+	func testTheCommandAtG0AnswersNotReady() {
 		var events: [[String: Any]] = []
 		BeamioConetChatModule.setNativeGateForTests(account: nil, sessionReady: false)
 		BeamioConetChatModule.handleCommand(["type": "accountCreateRegister", "reqId": 7001, "tag": "alice", "password": "pw"]) { payload in
@@ -316,7 +316,7 @@ final class NewAccountChainAndPayloadTests: XCTestCase {
 		let drained = expectation(description: "main queue drained")
 		DispatchQueue.main.async { drained.fulfill() }
 		wait(for: [drained], timeout: 5)
-		XCTAssertEqual(events.first?["error"] as? String, "no_key")
+		XCTAssertEqual(events.first?["error"] as? String, "not_ready")
 		XCTAssertNil(events.first?["result"])
 	}
 }
