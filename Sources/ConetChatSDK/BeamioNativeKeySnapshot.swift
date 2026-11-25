@@ -3,6 +3,13 @@ import Foundation
 /// Reads the state of the mark items of an account: `intent`, `mnemonic` and `commit` (25.52Y.83, 25.52Y.92). It reads no secret.
 protocol BeamioNativeMarkReading {
 	func itemState(_ kind: BeamioChatWalletItemKind, eoa: String) -> BeamioChatItemState
+	/// The state of the plain `mnemonic:<eoa>` device item only, as the readers see it (a retired item reads as absent, an unverified or unknown retirement as unreadable). It does not fall back
+	/// to the no-passcode mnemonic set, which `itemState(.mnemonic)` does. The default is `itemState(.mnemonic)`: a store that cannot tell the two apart keeps the conservative answer.
+	func legacyMnemonicItemState(eoa: String) -> BeamioChatItemState
+}
+
+extension BeamioNativeMarkReading {
+	func legacyMnemonicItemState(eoa: String) -> BeamioChatItemState { itemState(.mnemonic, eoa: eoa) }
 }
 
 extension BeamioChatWalletKeychainStore: BeamioNativeMarkReading {}
@@ -124,6 +131,9 @@ enum BeamioNativeKeySnapshot {
 
 	/// The refresh at the end of a change. A pinned-unknown test keeps the snapshot unknown and reads nothing.
 	private static func refreshAfterWriteLocked() {
+		// A write of the key records, the marks, the account pointer or the passcode state changes what a preread would read: the reading published for the epoch before it is no longer current. This is
+		// the one point every write path goes through (recovery, creation, import, the passcode commands, the page sync), so none of them can leave a stale preread behind.
+		BeamioPwaPreread.beforeWrite()
 		#if BEAMIO_TEST_HOOKS
 		if pinnedUnknown {
 			invalidate()
@@ -273,11 +283,22 @@ enum BeamioNativeKeySnapshot {
 		let items = markStore
 		let commit = items.itemState(.commit, eoa: pointer)
 		let intent = items.itemState(.intent, eoa: pointer)
-		let mnemonic = items.itemState(.mnemonic, eoa: pointer)
-		if commit == .unreadable || intent == .unreadable || mnemonic == .unreadable {
+		// markerMissing guards the half-written sequence of the key-record path (intent, key, plain mnemonic item, commit, intent removed): every half-written state keeps the intent or the plain
+		// mnemonic item. The no-passcode mnemonic set is one atomic record (written and read back before the pointer moves) and writes neither, so a set without a commit mark is not
+		// half-written. The mnemonic that counts here is therefore the plain device item only (`legacyMnemonicItemState`), not the set that `itemState(.mnemonic)` also reports.
+		let legacyMnemonic = items.legacyMnemonicItemState(eoa: pointer)
+		if commit == .unreadable || intent == .unreadable || legacyMnemonic == .unreadable {
 			return MarkJudgement(storageLock: nil, unreadable: true)
 		}
-		if keyPresent, commit == .absent, intent == .present || mnemonic == .present {
+		// An account of the shell passcode protocol (a passcode record, or the device record that passcodeDisable leaves) keeps its mnemonic item as the v3 header or as the device-bound phrase,
+		// and never writes a commit mark: that layout is not the key-record path either. A plain mnemonic item beside such a record is therefore not a half-written key-record account.
+		let hasVaultRecord: Bool = {
+			switch BeamioPasscodeSession.shared.vault?.shellRecord(eoa: pointer) {
+			case .some(.passcode), .some(.device): return true
+			default: return false
+			}
+		}()
+		if keyPresent, commit == .absent, intent == .present || (legacyMnemonic == .present && !hasVaultRecord) {
 			return MarkJudgement(storageLock: .markerMissing, unreadable: false)
 		}
 		if !keyPresent, commit == .present {

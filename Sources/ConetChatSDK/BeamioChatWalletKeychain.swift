@@ -851,6 +851,15 @@ extension BeamioChatWalletKeychainStore: BeamioChatMnemonicKeyStoring {
 		}
 	}
 
+	/// The plain `mnemonic:<owner>` item only (through `legacyAwareItem`, so a retired item reads as absent and an unverified retirement as unreadable), with no fallback to the no-passcode set.
+	func legacyMnemonicItemState(eoa: String) -> BeamioChatItemState {
+		let owner = Self.owner(eoa)
+		guard !owner.isEmpty else { return .unreadable }
+		let got = legacyAwareItem(.mnemonic, owner: owner)
+		if got.status == errSecItemNotFound { return .absent }
+		return got.status == errSecSuccess && got.data != nil ? .present : .unreadable
+	}
+
 	public func itemState(_ kind: BeamioChatWalletItemKind, eoa: String) -> BeamioChatItemState {
 		let owner = Self.owner(eoa)
 		guard !owner.isEmpty else { return .unreadable }
